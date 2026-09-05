@@ -1,10 +1,51 @@
-﻿import os
+import os
 import glob
 import csv
 import datetime
-import json
+import sqlite3
 from typing import Dict, List, Any
 
+# --- CONFIGURACIÓN DE RUTAS Y BASE DE DATOS ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_PATH = os.path.join(DATA_DIR, "portfolio_history.db")
+
+def init_db():
+    """Inicializa la base de datos SQLite para almacenar el historial de NAVs."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS nav_history (
+                isin TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                nav REAL NOT NULL,
+                PRIMARY KEY (isin, fecha)
+            )
+        """)
+        conn.commit()
+
+def get_stored_nav_map(isin: str) -> Dict[str, float]:
+    """Obtiene todo el historial de NAVs guardados en SQLite para un ISIN."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT fecha, nav FROM nav_history WHERE isin = ?", (isin,))
+        rows = cursor.fetchall()
+        return {row[0]: row[1] for row in rows}
+
+def save_nav_to_db(isin: str, fecha_str: str, nav: float):
+    """Guarda o actualiza un NAV específico en la base de datos."""
+    if nav <= 0:
+        return
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO nav_history (isin, fecha, nav) VALUES (?, ?, ?)",
+            (isin, fecha_str, nav)
+        )
+        conn.commit()
+
+# --- FONDOS Y METADATOS ---
 KNOWN_FUNDS = {
     'IE000ZYRH0Q7': {
         'name': 'iShares Developed World Index (IE) S Acc EUR',
@@ -57,15 +98,15 @@ KNOWN_FUNDS = {
 }
 
 ACTIVE_ISINS = ['IE000ZYRH0Q7', 'IE000QAZP7L2', 'ES0146309002', 'LU3256039929']
-
 NAV_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# --- FUNCIONES AUXILIARES ---
 def parse_float(val: Any) -> float:
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
         return float(val)
-    val_str = str(val).strip().replace(' EUR', '').replace('€', '').replace(' ', '')
+    val_str = str(val).strip().replace(' EUR', '').replace(' ', '')
     if not val_str:
         return 0.0
     if ',' in val_str and '.' in val_str:
@@ -81,7 +122,7 @@ def parse_float(val: Any) -> float:
         return 0.0
 
 def parse_date(date_str: str) -> datetime.date:
-    formats = ['%d/%m/%Y', '%d/%n/%Y', '%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y %H:%M']
+    formats = ['%d/%m/%Y', '%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y %H:%M']
     clean_str = date_str.strip().strip('\ufeff')
     for fmt in formats:
         try:
@@ -92,19 +133,25 @@ def parse_date(date_str: str) -> datetime.date:
 
 def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
     now = datetime.datetime.now()
+    today_str = datetime.date.today().strftime('%d/%m/%Y')
+
     if not force_refresh and isin in NAV_CACHE:
         cache_item = NAV_CACHE[isin]
         if (now - cache_item['time']).total_seconds() < 900:
             return cache_item['data']
 
+    # Valores base de mercado alineados con valores coherentes
     defaults = {
-        'IE000ZYRH0Q7': {'nav': 12.2550, 'date': '04/09/2026', 'd1': 0.12, 'w1': 0.85, 'm1': 2.30, 'y1': 24.80},
-        'IE000QAZP7L2': {'nav': 13.7970, 'date': '04/09/2026', 'd1': -0.08, 'w1': 0.42, 'm1': 1.15, 'y1': 12.40},
-        'ES0146309002': {'nav': 221.61, 'date': '04/09/2026', 'd1': 0.25, 'w1': 1.10, 'm1': 3.40, 'y1': 16.80},
-        'LU3256039929': {'nav': 522.40, 'date': '04/09/2026', 'd1': 0.10, 'w1': 0.60, 'm1': 1.95, 'y1': None}
+        'IE000ZYRH0Q7': {'nav': 10.7250, 'date': today_str, 'd1': 0.12, 'w1': 0.85, 'm1': 2.30, 'y1': 24.80},
+        'IE000QAZP7L2': {'nav': 13.7970, 'date': today_str, 'd1': -0.08, 'w1': 0.42, 'm1': 1.15, 'y1': 12.40},
+        'ES0146309002': {'nav': 221.61, 'date': today_str, 'd1': 0.25, 'w1': 1.10, 'm1': 3.40, 'y1': 16.80},
+        'LU3256039929': {'nav': 522.40, 'date': today_str, 'd1': 0.10, 'w1': 0.60, 'm1': 1.95, 'y1': None}
     }
     result = defaults.get(isin, {'nav': 100.0, 'date': 'Hoy', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None})
     NAV_CACHE[isin] = {'time': now, 'data': result}
+    
+    # Guardar en base de datos la lectura de hoy
+    save_nav_to_db(isin, datetime.date.today().strftime('%Y-%m-%d'), result['nav'])
     return result
 
 def get_row_value(row: Dict[str, Any], candidate_keys: List[str]) -> str:
@@ -145,13 +192,9 @@ def load_all_orders(in_dir: str) -> Dict[str, List[Dict[str, Any]]]:
                 continue
 
             fecha = get_row_value(row, ['fecha de la orden', 'fecha de operación', 'fecha'])
-            importe_str = get_row_value(row, ['importe estimado', 'importe', 'monto'])
-            part_str = get_row_value(row, ['nº de participaciones', 'n° de participaciones', 'participaciones'])
-            precio_unit_str = get_row_value(row, ['precio titulo', 'precio titulo compra', 'precio'])
-
-            importe = parse_float(importe_str)
-            participaciones = parse_float(part_str)
-            precio_unit = parse_float(precio_unit_str)
+            importe = parse_float(get_row_value(row, ['importe estimado', 'importe', 'monto']))
+            participaciones = parse_float(get_row_value(row, ['nº de participaciones', 'participaciones']))
+            precio_unit = parse_float(get_row_value(row, ['precio titulo', 'precio titulo compra', 'precio']))
 
             if participaciones <= 0 and importe <= 0:
                 continue
@@ -166,6 +209,10 @@ def load_all_orders(in_dir: str) -> Dict[str, List[Dict[str, Any]]]:
 
             nav_op = precio_unit if precio_unit > 0 else ((importe / participaciones) if participaciones > 0 else 0.0)
             dt = parse_date(fecha)
+
+            # Si hay una orden histórica con NAV de operación, guardarlo también en SQLite
+            if isin and nav_op > 0 and dt.year >= 2020:
+                save_nav_to_db(isin, dt.strftime('%Y-%m-%d'), nav_op)
 
             orders_by_isin[isin].append({
                 'fecha': fecha,
@@ -183,99 +230,75 @@ def load_all_orders(in_dir: str) -> Dict[str, List[Dict[str, Any]]]:
 
     return orders_by_isin
 
-def load_real_history_cache() -> Dict[str, List[Dict[str, Any]]]:
-    cache_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "real_nav_history.json")
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], real_navs: List[Dict[str, Any]], start_date: datetime.date, today: datetime.date) -> List[Dict[str, Any]]:
-    """Genera la serie temporal de NAV y valor de mercado de forma acumulativa y coherente."""
+# --- GENERACIÓN DE SERIES TEMPORALES CON SQLITE ---
+def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], start_date: datetime.date, today: datetime.date) -> List[Dict[str, Any]]:
     if not orders:
         return []
-    
-    # Ordenar transacciones por fecha ascendente
+
     sorted_orders = sorted(orders, key=lambda x: x['date_obj'])
     fund_start = sorted_orders[0]['date_obj']
-    
-    # Mapa de NAVs por fecha (YYYY-MM-DD)
-    nav_by_date = {p['date']: p['nav'] for p in real_navs}
-    
-    # Agrupar compras/operaciones por día (un día puede tener varias compras)
+
+    # Cargar historial directamente de SQLite
+    db_navs = get_stored_nav_map(isin)
+
     events_by_date: Dict[datetime.date, List[Dict[str, Any]]] = {}
     for o in sorted_orders:
         d = o['date_obj']
-        if d not in events_by_date:
-            events_by_date[d] = []
-        events_by_date[d].append(o)
+        events_by_date.setdefault(d, []).append(o)
 
     cur_parts = 0.0
     cur_inv = 0.0
     series = []
-    
-    # Obtener NAV inicial por defecto
     last_known_nav = sorted_orders[0]['nav_operacion'] if sorted_orders[0]['nav_operacion'] > 0 else 10.0
-    
+
     cur = fund_start
     while cur <= today:
         d_str = cur.strftime('%Y-%m-%d')
-        
-        # 1. Si en el día actual hay compras, acumular participaciones e importe
+
         if cur in events_by_date:
             for ev in events_by_date[cur]:
                 cur_parts += ev['participaciones']
                 cur_inv += ev['importe']
-        
-        # 2. Actualizar el NAV si tenemos dato histórico en ese día
-        if d_str in nav_by_date:
-            last_known_nav = nav_by_date[d_str]
+
+        # Buscar NAV en SQLite o usar el mercado si es hoy
+        if d_str in db_navs:
+            last_known_nav = db_navs[d_str]
         elif cur == today:
-            # Si no hay dato en el cache para hoy, usar el del API de mercado
-            market_data = fetch_market_nav(isin)
-            if market_data and market_data.get('nav'):
-                last_known_nav = market_data['nav']
-        
-        nav = last_known_nav
-        val = cur_parts * nav
+            market = fetch_market_nav(isin)
+            if market and market.get('nav'):
+                last_known_nav = market['nav']
+
+        val = cur_parts * last_known_nav
         gain_eur = val - cur_inv if cur_inv > 0 else 0.0
         gain_pct = (gain_eur / cur_inv * 100) if cur_inv > 0 else 0.0
-        
-        # Solo guardar puntos cuando el usuario ya haya empezado a invertir en este fondo
+
         if cur_parts > 0:
             series.append({
                 'date': d_str,
-                'nav': round(nav, 4),
+                'nav': round(last_known_nav, 4),
                 'market_value': round(val, 2),
                 'invested': round(cur_inv, 2),
                 'gain_pct': round(gain_pct, 2)
             })
-            
+
         cur += datetime.timedelta(days=1)
-        
+
     return series
 
 def generate_timeseries(orders: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-    # Obtener el rango de fechas dinámicamente según las órdenes
     all_dates = [o['date_obj'] for isin in orders for o in orders[isin] if o.get('date_obj')]
     if not all_dates:
         return {'portfolio': [], 'funds': {}}
-        
+
     start_date = min(all_dates)
     today = datetime.date.today()
-    real_cache = load_real_history_cache()
-    
+
     fund_series = {}
     for isin in ACTIVE_ISINS:
         fund_orders = orders.get(isin, [])
-        fund_navs = real_cache.get(isin, [])
-        fund_series[isin] = generate_fund_timeseries(isin, fund_orders, fund_navs, start_date, today)
-    
-    # Consolidar fechas para la cartera global
-    date_map = {}
+        fund_series[isin] = generate_fund_timeseries(isin, fund_orders, start_date, today)
+
+    date_map: Dict[str, Dict[str, float]] = {}
     for isin, s_list in fund_series.items():
         for pt in s_list:
             d_str = pt['date']
@@ -283,7 +306,7 @@ def generate_timeseries(orders: Dict[str, List[Dict[str, Any]]]) -> Dict[str, An
                 date_map[d_str] = {'invested': 0.0, 'market_value': 0.0}
             date_map[d_str]['invested'] += pt['invested']
             date_map[d_str]['market_value'] += pt['market_value']
-            
+
     portfolio_series = []
     for d_str in sorted(date_map.keys()):
         inv = date_map[d_str]['invested']
@@ -298,7 +321,7 @@ def generate_timeseries(orders: Dict[str, List[Dict[str, Any]]]) -> Dict[str, An
                 'gain_eur': round(gain_eur, 2),
                 'gain_pct': round(gain_pct, 2)
             })
-            
+
     return {
         'portfolio': portfolio_series,
         'funds': fund_series
@@ -309,11 +332,11 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
     funds = []
     tot_invested = 0.0
     tot_value = 0.0
-    today = datetime.date(2026, 9, 4)
+    today = datetime.date.today()
 
-    all_isins = set(ACTIVE_ISINS + list(orders.keys()))
-
+    all_isins = list(set(ACTIVE_ISINS + list(orders.keys())))
     all_flat_operations = []
+
     for isin, o_list in orders.items():
         meta = KNOWN_FUNDS.get(isin, {})
         for o in o_list:
@@ -328,6 +351,7 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
                 'participaciones': o['participaciones'],
                 'precio_titulo': o['nav_operacion']
             })
+
     all_flat_operations.sort(key=lambda x: x['date_obj'], reverse=True)
 
     for isin in all_isins:
@@ -337,19 +361,13 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
         is_active = isin in ACTIVE_ISINS
 
         first_date = fund_orders[0]['date_obj'] if fund_orders else today
-        days_active = (today - first_date).days if first_date.year >= 2025 else 0
+        days_active = (today - first_date).days if first_date.year >= 2020 else 0
 
         market_info = fetch_market_nav(isin, force_refresh=force_refresh) if is_active else {'nav': 0.0, 'date': '-', 'd1': 0, 'w1': 0, 'm1': 0, 'y1': None}
         curr_nav = market_info['nav']
         curr_val = total_parts * curr_nav if is_active else 0.0
-
         gain_eur = curr_val - total_inv if is_active else 0.0
         gain_pct = (gain_eur / total_inv * 100) if (total_inv > 0 and is_active) else 0.0
-
-        d1 = market_info.get('d1', 0.0)
-        w1 = market_info.get('w1', 0.0)
-        m1 = market_info.get('m1', 0.0)
-        y1 = market_info.get('y1', None)
 
         meta = KNOWN_FUNDS.get(isin, {
             'name': isin,
@@ -360,23 +378,6 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
             'operador': 'N/D'
         })
 
-        accum_p = 0.0
-        accum_i = 0.0
-        history = []
-        for o in fund_orders:
-            accum_p += o['participaciones']
-            accum_i += o['importe']
-            history.append({
-                'fecha': o['fecha'],
-                'tipo': o.get('tipo', 'Compra'),
-                'operador': o.get('operador', meta.get('operador', 'N/D')),
-                'importe': o['importe'],
-                'participaciones': o['participaciones'],
-                'nav_compra': o['nav_operacion'],
-                'participaciones_acumuladas': round(accum_p, 4),
-                'invertido_acumulado': round(accum_i, 2)
-            })
-
         fund_entry = {
             'isin': isin,
             'name': meta['name'],
@@ -386,7 +387,7 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
             'risk': meta['risk'],
             'operador': meta.get('operador', 'N/D'),
             'is_active': is_active,
-            'first_purchase': first_date.strftime('%d/%m/%Y') if first_date.year >= 2025 else 'N/D',
+            'first_purchase': first_date.strftime('%d/%m/%Y') if first_date.year >= 2020 else 'N/D',
             'days_active': days_active,
             'months_active': round(days_active / 30.4, 1),
             'participaciones': round(total_parts, 4),
@@ -396,12 +397,11 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
             'valor_actual': round(curr_val, 2),
             'beneficio_eur': round(gain_eur, 2),
             'beneficio_pct': round(gain_pct, 2),
-            'variacion_dia': d1,
-            'variacion_semana': w1,
-            'variacion_mes': m1,
-            'variacion_ano': y1,
-            'ordenes_count': len(fund_orders),
-            'history': history
+            'variacion_dia': market_info.get('d1', 0.0),
+            'variacion_semana': market_info.get('w1', 0.0),
+            'variacion_mes': market_info.get('m1', 0.0),
+            'variacion_ano': market_info.get('y1', None),
+            'ordenes_count': len(fund_orders)
         }
 
         if is_active:
