@@ -1,0 +1,262 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mi Cartera de Inversión</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div>
+        <h1>Cartera de Inversión Multigestora</h1>
+        <p class="subtitle">MyInvestor · Horos · Silverway</p>
+      </div>
+      <div class="header-actions">
+        <button id="refreshBtn" class="btn-refresh" onclick="loadData(true)">
+          <span id="refreshSpinner" class="refresh-icon">↻</span> <span id="refreshText">Actualizar Precios</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- KPI Summary Cards -->
+    <div class="kpi-grid">
+      <div class="kpi-card highlight">
+        <span class="kpi-label">
+          Valor de Mercado
+          <span class="info-icon" data-tooltip="Suma del valor actual de todas tus participaciones a los precios liquidativos más recientes.">ⓘ</span>
+        </span>
+        <div class="kpi-value" id="kpiMarketVal">-- €</div>
+        <div class="kpi-sub" id="kpiGain">-- € (--%)</div>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">
+          Capital Invertido
+          <span class="info-icon" data-tooltip="Dinero neto total aportado a los fondos activos mediante compras y traspasos.">ⓘ</span>
+        </span>
+        <div class="kpi-value" id="kpiInvested">-- €</div>
+        <div class="kpi-sub muted">Aportaciones netas</div>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">
+          Rentabilidad Total
+          <span class="info-icon" data-tooltip="Rentabilidad real ponderada de toda tu cartera: (Valor Actual - Invertido) / Invertido.">ⓘ</span>
+        </span>
+        <div class="kpi-value" id="kpiGainPct">--%</div>
+        <div class="kpi-sub" id="kpiGainAbs">-- € de beneficio</div>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">
+          Fondos Activos
+          <span class="info-icon" data-tooltip="Número de fondos actualmente en cartera generando rentabilidad.">ⓘ</span>
+        </span>
+        <div class="kpi-value" id="kpiActiveCount">4</div>
+        <div class="kpi-sub muted" id="kpiLastUpdated">Actualizado: --</div>
+      </div>
+    </div>
+
+    <!-- Interactive Timeseries Chart with Fund Selector -->
+    <div class="panel chart-panel-full">
+      <div class="chart-top-bar">
+        <!-- Selector de Vista: Toda la cartera vs Fondo individual -->
+        <div class="chart-view-selector" id="fundViewButtons">
+          <button class="view-tab active" onclick="switchChartView('TOTAL', this)">📊 Toda la Cartera</button>
+          <button class="view-tab" onclick="switchChartView('IE000ZYRH0Q7', this)">iShares World</button>
+          <button class="view-tab" onclick="switchChartView('IE000QAZP7L2', this)">iShares Emergentes</button>
+          <button class="view-tab" onclick="switchChartView('LU3256039929', this)">Silverway Apex</button>
+          <button class="view-tab" onclick="switchChartView('ES0146309002', this)">Horos Internacional</button>
+        </div>
+
+        <!-- Filtro temporal -->
+        <div class="timeframe-selector">
+          <button class="tf-btn" onclick="setTimeframe('1D', this)">1D</button>
+          <button class="tf-btn" onclick="setTimeframe('5D', this)">5D</button>
+          <button class="tf-btn" onclick="setTimeframe('1M', this)">1M</button>
+          <button class="tf-btn" onclick="setTimeframe('6M', this)">6M</button>
+          <button class="tf-btn" onclick="setTimeframe('YTD', this)">YTD</button>
+          <button class="tf-btn" onclick="setTimeframe('1Y', this)">1Y</button>
+          <button class="tf-btn active" onclick="setTimeframe('ALL', this)">All</button>
+        </div>
+      </div>
+
+      <div class="chart-sub-metric" id="chartCurrentMetric">
+        <span>Evolución: <strong>--</strong></span>
+      </div>
+
+      <div class="chart-container-large">
+        <canvas id="portfolioTimeseriesChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Allocation & Period Variations Row -->
+    <div class="grid-2col">
+      <div class="panel">
+        <h3>
+          Distribución de la Cartera
+          <span class="info-icon" data-tooltip="Porcentaje del capital invertido asignado a cada fondo según su valor actual de mercado.">ⓘ</span>
+        </h3>
+        <div class="chart-container-doughnut">
+          <canvas id="allocationChart"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>
+          Variaciones Reales del Fondo (Mercado)
+          <span class="info-icon" data-tooltip="Rendimiento del propio fondo (su Valor Liquidativo) en el mercado en cada periodo oficial. Si el fondo tiene pocos meses de vida, se indica N/D.">ⓘ</span>
+        </h3>
+        <div class="table-responsive">
+          <table class="table-compact">
+            <thead>
+              <tr>
+                <th>Fondo</th>
+                <th>
+                  Día
+                  <span class="info-icon" data-tooltip="Variación % del Valor Liquidativo en la última sesión de mercado.">ⓘ</span>
+                </th>
+                <th>
+                  Semana
+                  <span class="info-icon" data-tooltip="Variación % del fondo en los últimos 7 días.">ⓘ</span>
+                </th>
+                <th>
+                  Mes
+                  <span class="info-icon" data-tooltip="Variación % del fondo en los últimos 30 días.">ⓘ</span>
+                </th>
+                <th>
+                  Año
+                  <span class="info-icon" data-tooltip="Variación % del fondo a 1 año. Muestra N/D si el fondo tiene menos de 1 año en el mercado.">ⓘ</span>
+                </th>
+                <th>
+                  Mi Rentabilidad Real
+                  <span class="info-icon" data-tooltip="Tu rentabilidad personal neta conseguida con tus compras en los meses transcurridos: (Valor actual - Invertido) / Invertido.">ⓘ</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody id="variationsTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+        <div class="alert-box">
+          <small>💡 <strong>Diferencia clave:</strong> Las columnas Día/Semana/Mes/Año reflejan la evolución <em>del fondo en el mercado</em>. La columna <em>Mi Rentabilidad Real</em> calcula tu ganancia personal en base a cuándo compraste.</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Active Funds Table -->
+    <div class="panel main-table-panel">
+      <h3>Detalle de Posiciones Activas</h3>
+      <div class="table-responsive">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Fondo / ISIN</th>
+              <th>Operador</th>
+              <th>
+                Participaciones
+                <span class="info-icon" data-tooltip="Número total de títulos que posees tras acumular todas tus órdenes de compra y traspaso.">ⓘ</span>
+              </th>
+              <th>
+                Invertido
+                <span class="info-icon" data-tooltip="Suma total en euros del dinero aportado de tu bolsillo para adquirir las participaciones.">ⓘ</span>
+              </th>
+              <th>
+                NAV Actual
+                <span class="info-icon" data-tooltip="Valor Liquidativo (precio por participación) publicado por la gestora en la última sesión.">ⓘ</span>
+              </th>
+              <th>
+                Valor Mercado
+                <span class="info-icon" data-tooltip="Valor actual de tu posición: Participaciones × NAV Actual.">ⓘ</span>
+              </th>
+              <th>
+                Beneficio (€)
+                <span class="info-icon" data-tooltip="Ganancia o pérdida neta en euros: Valor Mercado - Invertido.">ⓘ</span>
+              </th>
+              <th>
+                Rentabilidad (%)
+                <span class="info-icon" data-tooltip="Porcentaje de ganancia sobre lo invertido: Beneficio (€) / Invertido × 100.">ⓘ</span>
+              </th>
+              <th>
+                Peso
+                <span class="info-icon" data-tooltip="Porcentaje que representa este fondo sobre el valor total de tu cartera.">ⓘ</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody id="fundsTableBody">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Full Operations History Section (Always Visible) -->
+    <div class="panel">
+      <div class="panel-header-accordion" onclick="toggleSection('operationsContent', 'opAccordionIcon')">
+        <h3>
+          Historial Completo de Operaciones (Compras y Traspasos)
+          <span class="info-icon" data-tooltip="Registro cronológico detallado de cada orden ejecutada con fecha, operador, participaciones y precio al que se compró.">ⓘ</span>
+        </h3>
+        <span id="opAccordionIcon">▲</span>
+      </div>
+      <div id="operationsContent">
+        <p class="muted" style="margin-bottom: 12px;">Detalle de todas las órdenes registradas en tu cartera:</p>
+        <div class="table-responsive">
+          <table class="table table-compact">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Tipo</th>
+                <th>Fondo</th>
+                <th>Operador</th>
+                <th>Importe</th>
+                <th>Participaciones</th>
+                <th>Precio Título</th>
+              </tr>
+            </thead>
+            <tbody id="operationsTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Historical Transferred Funds Section -->
+    <div class="panel">
+      <div class="panel-header-accordion" onclick="toggleSection('transfersContent', 'accordionIcon')">
+        <h3>
+          Fondos Traspasados / Cerrados en su momento
+          <span class="info-icon" data-tooltip="Fondos que pertenecieron a la cartera y cuyo capital fue traspasado para consolidar la estrategia.">ⓘ</span>
+        </h3>
+        <span id="accordionIcon">▼</span>
+      </div>
+      <div id="transfersContent" class="hidden">
+        <p class="muted" style="margin-bottom: 12px;">Fondos traspasados a las posiciones actuales:</p>
+        <table class="table table-compact">
+          <thead>
+            <tr>
+              <th>Fondo / ISIN</th>
+              <th>Categoría</th>
+              <th>Aportado en su momento</th>
+              <th>Órdenes</th>
+              <th>Estado</th>
+            </tr>
+          </thead>
+          <tbody id="transferredTableBody">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <span>Carpeta de sincronización: <code>c:\Users\JmPed\trabajo\inversion\IN</code></span>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
