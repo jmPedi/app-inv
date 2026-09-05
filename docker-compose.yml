@@ -12,5 +12,6 @@ services:
       - /Volumes/SSD-Datos/docker/apps/inv/IN:/app/IN
       # Montamos la carpeta raíz del SSD para que pueda leer y modificar Fondos.xlsx sin dar error de directorio
       - /Volumes/SSD-Datos/docker/apps/inv/Fondos.xlsx:/app/Fondos.xlsx
+      - /Volumes/SSD-Datos/docker/apps/inv/data:/app/data
     environment:
       - PORT=8000
