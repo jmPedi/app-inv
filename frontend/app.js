@@ -111,7 +111,7 @@ async function loadData(forceRefresh = false) {
         <td>${formatEur(f.invertido)}</td>
         <td>${f.nav_actual.toFixed(2)} €</td>
         <td><strong>${formatEur(f.valor_actual)}</strong></td>
-        <td class="${f.beneficio_eur >= 0 ? 'positive' : 'negative'}"><strong>+${formatEur(f.beneficio_eur)}</strong></td>
+        <td class="${f.beneficio_eur >= 0 ? 'positive' : 'negative'}"><strong>${f.beneficio_eur > 0 ? '+' : ''}${formatEur(f.beneficio_eur)}</strong></td>
         <td>${renderBadge(f.beneficio_pct)}</td>
         <td><strong>${f.peso_pct.toFixed(1)}%</strong></td>
       </tr>
