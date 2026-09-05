@@ -1,4 +1,4 @@
-﻿let doughnutChartInstance = null;
+let doughnutChartInstance = null;
 let timeseriesChartInstance = null;
 let globalData = null;
 let currentView = 'TOTAL';
@@ -110,6 +110,7 @@ async function loadData(forceRefresh = false) {
         <td><strong>${f.participaciones}</strong></td>
         <td>${formatEur(f.invertido)}</td>
         <td>${f.nav_actual.toFixed(2)} €</td>
+        <td style="font-size: 0.85rem; color: var(--text-muted);">${f.fecha_nav.includes('-') ? f.fecha_nav.split('-').reverse().join('/') : f.fecha_nav}</td>
         <td><strong>${formatEur(f.valor_actual)}</strong></td>
         <td class="${f.beneficio_eur >= 0 ? 'positive' : 'negative'}"><strong>${f.beneficio_eur > 0 ? '+' : ''}${formatEur(f.beneficio_eur)}</strong></td>
         <td>${renderBadge(f.beneficio_pct)}</td>
@@ -284,11 +285,12 @@ function renderTimeseriesChart() {
         label: 'Valor de Mercado',
         data: values,
         borderColor: '#14b8a6',
-        borderWidth: 2.2,
+        borderWidth: 2,
+        tension: 0.3,
+        spanGaps: true,
         pointRadius: 0,
         pointHoverRadius: 5,
         pointBackgroundColor: '#14b8a6',
-        tension: 0.1,
         fill: true,
         backgroundColor: gradient
       },
@@ -321,11 +323,12 @@ function renderTimeseriesChart() {
         label: `NAV ${fundMeta.short_name} (€/part)`,
         data: navs,
         borderColor: '#38bdf8',
-        borderWidth: 2.2,
+        borderWidth: 2,
+        tension: 0.3,
+        spanGaps: true,
         pointRadius: 0,
         pointHoverRadius: 6,
         pointBackgroundColor: '#38bdf8',
-        tension: 0.1,
         fill: true,
         backgroundColor: gradient
       }
