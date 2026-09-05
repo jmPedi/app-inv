@@ -162,24 +162,55 @@ def parse_date(date_str: str) -> datetime.date:
 
 def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
     now = datetime.datetime.now()
-    today_str = datetime.date.today().strftime('%d/%m/%Y')
 
+    # 1. Tirar de caché en memoria si la pedimos hace menos de 15 minutos
     if not force_refresh and isin in NAV_CACHE:
         cache_item = NAV_CACHE[isin]
         if (now - cache_item['time']).total_seconds() < 900:
             return cache_item['data']
 
-    defaults = {
-        'IE000ZYRH0Q7': {'nav': 10.7250, 'date': today_str, 'd1': 0.12, 'w1': 0.85, 'm1': 2.30, 'y1': 24.80},
-        'IE000QAZP7L2': {'nav': 13.7970, 'date': today_str, 'd1': -0.08, 'w1': 0.42, 'm1': 1.15, 'y1': 12.40},
-        'ES0146309002': {'nav': 221.61, 'date': today_str, 'd1': 0.25, 'w1': 1.10, 'm1': 3.40, 'y1': 16.80},
-        'LU3256039929': {'nav': 522.40, 'date': today_str, 'd1': 0.10, 'w1': 0.60, 'm1': 1.95, 'y1': None}
-    }
-    result = defaults.get(isin, {'nav': 100.0, 'date': 'Hoy', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None})
-    NAV_CACHE[isin] = {'time': now, 'data': result}
-    
-    save_nav_to_db(isin, datetime.date.today().strftime('%Y-%m-%d'), result['nav'])
-    return result
+    try:
+        # 2. Consultar el mercado real con mstarpy
+        fund = mstarpy.Funds(term=isin, country='es')
+        # Pedimos los últimos 7 días para asegurarnos de pillar el último día hábil de mercado
+        market_data = fund.historicalData(
+            start_date=datetime.date.today() - datetime.timedelta(days=7), 
+            end_date=datetime.date.today()
+        )
+        
+        if market_data and 'nav' in market_data and len(market_data['nav']) > 0:
+            # Coger el último registro disponible
+            last_entry = market_data['nav'][-1]
+            live_nav = float(last_entry['nav'])
+            live_date_str = last_entry['date'].split('T')[0]
+            
+            result = {
+                'nav': live_nav, 
+                'date': live_date_str, 
+                'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None
+            }
+            
+            NAV_CACHE[isin] = {'time': now, 'data': result}
+            save_nav_to_db(isin, live_date_str, live_nav)
+            return result
+            
+    except Exception as e:
+        print(f"Error al obtener NAV en vivo para {isin}: {e}")
+
+    # 3. Fallback: Si la API de Morningstar falla, usamos el último valor guardado en SQLite
+    db_navs = get_stored_nav_map(isin)
+    if db_navs:
+        last_date = max(db_navs.keys())
+        result = {
+            'nav': db_navs[last_date], 
+            'date': last_date, 
+            'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None
+        }
+        NAV_CACHE[isin] = {'time': now, 'data': result}
+        return result
+        
+    # 4. Fallback final de seguridad si todo falla
+    return {'nav': 0.0, 'date': '-', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None}
 
 def get_row_value(row: Dict[str, Any], candidate_keys: List[str]) -> str:
     normalized_row = {k.strip().lower().replace('"', '').replace("'", ''): v for k, v in row.items()}
