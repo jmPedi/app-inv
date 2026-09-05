@@ -4,6 +4,7 @@ import csv
 import datetime
 import sqlite3
 from typing import Dict, List, Any
+import mstarpy
 
 # --- CONFIGURACIÓN DE RUTAS Y BASE DE DATOS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +45,34 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
             (isin, fecha_str, nav)
         )
         conn.commit()
+
+def populate_missing_history(isin: str, first_order_date: datetime.date):
+    """
+    Descarga el historial de NAVs desde Morningstar desde la primera compra hasta hoy
+    y lo almacena en SQLite. Solo ejecuta si no hay datos guardados previamente.
+    """
+    existing_navs = get_stored_nav_map(isin)
+    
+    # Si la tabla ya tiene más de 15 días guardados para este ISIN, no consulta la API externa
+    if len(existing_navs) > 15:
+        return
+
+    try:
+        # Definir rango dinámico: desde 30 días antes de la primera compra hasta hoy
+        start_date = first_order_date - datetime.timedelta(days=30)
+        end_date = datetime.date.today()
+        
+        fund = mstarpy.Funds(term=isin, country='es')
+        history = fund.historicalData(start_date=start_date, end_date=end_date)
+        
+        if history and 'nav' in history:
+            for item in history['nav']:
+                date_str = item['date'].split('T')[0]
+                nav_val = float(item['nav'])
+                save_nav_to_db(isin, date_str, nav_val)
+                
+    except Exception as e:
+        print(f"Aviso: No se pudo descargar historial de Morningstar para {isin}: {e}")
 
 # --- FONDOS Y METADATOS ---
 KNOWN_FUNDS = {
@@ -140,7 +169,6 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
         if (now - cache_item['time']).total_seconds() < 900:
             return cache_item['data']
 
-    # Valores base de mercado alineados con valores coherentes
     defaults = {
         'IE000ZYRH0Q7': {'nav': 10.7250, 'date': today_str, 'd1': 0.12, 'w1': 0.85, 'm1': 2.30, 'y1': 24.80},
         'IE000QAZP7L2': {'nav': 13.7970, 'date': today_str, 'd1': -0.08, 'w1': 0.42, 'm1': 1.15, 'y1': 12.40},
@@ -150,7 +178,6 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
     result = defaults.get(isin, {'nav': 100.0, 'date': 'Hoy', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None})
     NAV_CACHE[isin] = {'time': now, 'data': result}
     
-    # Guardar en base de datos la lectura de hoy
     save_nav_to_db(isin, datetime.date.today().strftime('%Y-%m-%d'), result['nav'])
     return result
 
@@ -210,7 +237,6 @@ def load_all_orders(in_dir: str) -> Dict[str, List[Dict[str, Any]]]:
             nav_op = precio_unit if precio_unit > 0 else ((importe / participaciones) if participaciones > 0 else 0.0)
             dt = parse_date(fecha)
 
-            # Si hay una orden histórica con NAV de operación, guardarlo también en SQLite
             if isin and nav_op > 0 and dt.year >= 2020:
                 save_nav_to_db(isin, dt.strftime('%Y-%m-%d'), nav_op)
 
@@ -238,7 +264,10 @@ def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], start_date
     sorted_orders = sorted(orders, key=lambda x: x['date_obj'])
     fund_start = sorted_orders[0]['date_obj']
 
-    # Cargar historial directamente de SQLite
+    # 1. Rellenar historial dinámico en SQLite si la tabla está vacía
+    populate_missing_history(isin, fund_start)
+
+    # 2. Cargar datos de SQLite
     db_navs = get_stored_nav_map(isin)
 
     events_by_date: Dict[datetime.date, List[Dict[str, Any]]] = {}
@@ -260,8 +289,7 @@ def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], start_date
                 cur_parts += ev['participaciones']
                 cur_inv += ev['importe']
 
-        # Buscar NAV en SQLite o usar el mercado si es hoy
-        if d_str in db_navs:
+        if d_str in db_navs and db_navs[d_str] > 0:
             last_known_nav = db_navs[d_str]
         elif cur == today:
             market = fetch_market_nav(isin)
