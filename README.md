@@ -22,5 +22,5 @@ Aplicación web desarrollada en Python con FastAPI para la gestión e inversión
 
 ### 1. Clonar el repositorio
 ```bash
-git clone [https://github.com/jmPedi/inv.git](https://github.com/jmPedi/inv.git)
-cd inv
+git clone [https://github.com/jmPedi/inv.git](https://github.com/jmPedi/app-inv.git)
+cd app-inv
