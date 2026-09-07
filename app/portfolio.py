@@ -48,28 +48,36 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
 
 def populate_missing_history(isin: str, first_order_date: datetime.date):
     """
-    Descarga el historial completo si detecta que faltan datos en la base de datos.
+    Descarga el historial completo si detecta que faltan datos diarios en SQLite.
     """
     existing_navs = get_stored_nav_map(isin)
     
-    # Ampliamos el margen a 100 días para asegurar que descargue la serie continua,
-    # no solo los días sueltos de tus compras.
+    # Ampliamos a 100 para asegurar que exija una serie continua, no solo las fechas de compra
     if len(existing_navs) > 100:
         return
 
     try:
+        print(f"[{isin}] Descargando histórico desde Morningstar...")
         start_date = first_order_date - datetime.timedelta(days=30)
         end_date = datetime.date.today()
         
         fund = mstarpy.Funds(term=isin, country='es')
         history = fund.historicalData(start_date=start_date, end_date=end_date)
         
-        if history and 'nav' in history:
-            for item in history['nav']:
-                date_str = item['date'].split('T')[0]
-                nav_val = float(item['nav'])
-                save_nav_to_db(isin, date_str, nav_val)
-                
+        # Corrección: mstarpy devuelve una lista de diccionarios directamente
+        if history and isinstance(history, list):
+            for item in history:
+                if 'date' in item and 'nav' in item:
+                    date_val = item['date']
+                    if isinstance(date_val, str):
+                        date_str = date_val.split('T')[0]
+                    else:
+                        date_str = date_val.strftime('%Y-%m-%d')
+                    
+                    nav_val = float(item['nav'])
+                    save_nav_to_db(isin, date_str, nav_val)
+            print(f"[{isin}] Histórico diario guardado con éxito.")
+            
     except Exception as e:
         print(f"Aviso: No se pudo descargar historial de Morningstar para {isin}: {e}")
 
@@ -167,25 +175,27 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
         if (now - cache_item['time']).total_seconds() < 900:
             return cache_item['data']
 
+    # 1. Actualizar el último dato disponible de hoy
     try:
-        # 1. Traer solo el último NAV de mercado para mantener la BBDD al día
         fund = mstarpy.Funds(term=isin, country='es')
         market_data = fund.historicalData(
             start_date=datetime.date.today() - datetime.timedelta(days=10), 
             end_date=datetime.date.today()
         )
-        if market_data and 'nav' in market_data and len(market_data['nav']) > 0:
-            last_entry = market_data['nav'][-1]
-            save_nav_to_db(isin, last_entry['date'].split('T')[0], float(last_entry['nav']))
+        if market_data and isinstance(market_data, list) and len(market_data) > 0:
+            last_entry = market_data[-1]
+            date_val = last_entry['date']
+            date_str = date_val.split('T')[0] if isinstance(date_val, str) else date_val.strftime('%Y-%m-%d')
+            save_nav_to_db(isin, date_str, float(last_entry['nav']))
     except Exception as e:
-        print(f"Aviso: No se pudo actualizar NAV de hoy para {isin}: {e}")
+        pass 
 
-    # 2. Calcular todas las variaciones leyendo la BBDD local completa
+    # 2. Calcular variaciones leyendo todo el histórico local de SQLite
     db_navs = get_stored_nav_map(isin)
     if not db_navs:
         return {'nav': 0.0, 'date': '-', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None}
 
-    # Ordenar fechas para cálculos
+    # Ordenar cronológicamente
     nav_by_date_obj = {datetime.datetime.strptime(d, '%Y-%m-%d').date(): v for d, v in db_navs.items()}
     sorted_dates = sorted(nav_by_date_obj.keys())
     
@@ -193,27 +203,27 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
     live_nav = nav_by_date_obj[latest_obj]
     latest_date_str = latest_obj.strftime('%Y-%m-%d')
 
-    # Función auxiliar para buscar el NAV más cercano a X días atrás
-    def get_closest_nav(target_days_ago):
+    # Función para buscar días hábiles hacia atrás (salta fines de semana)
+    def get_closest_nav(target_days_ago, max_search_window=10):
         target = latest_obj - datetime.timedelta(days=target_days_ago)
-        for i in range(7): # Buscar hasta 7 días atrás (fines de semana/festivos)
+        for i in range(max_search_window): 
             check_date = target - datetime.timedelta(days=i)
             if check_date in nav_by_date_obj:
                 return nav_by_date_obj[check_date]
         return None
 
-    # Variación 1 Día (el día inmediatamente anterior registrado)
+    # Variación 1 Día
     prev_nav = nav_by_date_obj[sorted_dates[-2]] if len(sorted_dates) >= 2 else live_nav
     d1 = round(((live_nav - prev_nav) / prev_nav) * 100, 2) if prev_nav else 0.0
 
-    # Variación 1 Semana, 1 Mes, 1 Año
-    week_nav = get_closest_nav(7)
+    # Variaciones con margen de búsqueda ampliado
+    week_nav = get_closest_nav(7, max_search_window=10)
     w1 = round(((live_nav - week_nav) / week_nav) * 100, 2) if week_nav else 0.0
 
-    month_nav = get_closest_nav(30)
+    month_nav = get_closest_nav(30, max_search_window=15)
     m1 = round(((live_nav - month_nav) / month_nav) * 100, 2) if month_nav else 0.0
 
-    year_nav = get_closest_nav(365)
+    year_nav = get_closest_nav(365, max_search_window=30)
     y1 = round(((live_nav - year_nav) / year_nav) * 100, 2) if year_nav else None
 
     result = {
@@ -308,7 +318,7 @@ def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], start_date
     sorted_orders = sorted(orders, key=lambda x: x['date_obj'])
     fund_start = sorted_orders[0]['date_obj']
 
-    # 1. Rellenar historial dinámico en SQLite si la tabla está vacía
+    # 1. Rellenar historial dinámico en SQLite
     populate_missing_history(isin, fund_start)
 
     # 2. Cargar datos de SQLite
@@ -428,11 +438,7 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
 
     for isin in all_isins:
         fund_orders = orders.get(isin, [])
-        
-        # --- CÁLCULO EXACTO BASADO EN CADA ORDEN INDIVIDUAL ---
         total_parts = sum(o['participaciones'] for o in fund_orders)
-        
-        # Invertido real exacto sumando el importe monetario de cada orden de compra
         total_inv = sum(o['importe'] for o in fund_orders)
         
         is_active = isin in ACTIVE_ISINS
@@ -441,11 +447,8 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
 
         market_info = fetch_market_nav(isin, force_refresh=force_refresh) if is_active else {'nav': 0.0, 'date': '-', 'd1': 0, 'w1': 0, 'm1': 0, 'y1': None}
         curr_nav = market_info['nav']
-        
-        # Valor de mercado actual estricto: Participaciones acumuladas × NAV actual de mercado
         curr_val = total_parts * curr_nav if is_active else 0.0
         
-        # Beneficio neto real sumando todas las aportaciones históricas
         gain_eur = curr_val - total_inv if is_active else 0.0
         gain_pct = (gain_eur / total_inv * 100) if (total_inv > 0 and is_active) else 0.0
 
