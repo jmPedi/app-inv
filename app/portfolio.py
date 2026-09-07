@@ -61,7 +61,7 @@ def populate_missing_history(isin: str, first_order_date: datetime.date):
         start_date = first_order_date - datetime.timedelta(days=30)
         end_date = datetime.date.today()
         
-        fund = mstarpy.Funds(term=isin, country='es')
+        fund = mstarpy.Funds(term=isin)
         history = fund.historicalData(start_date=start_date, end_date=end_date)
         
         # Corrección: mstarpy devuelve una lista de diccionarios directamente
@@ -177,7 +177,7 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
 
     # 1. Actualizar el último dato disponible de hoy
     try:
-        fund = mstarpy.Funds(term=isin, country='es')
+        fund = mstarpy.Funds(term=isin)
         market_data = fund.historicalData(
             start_date=datetime.date.today() - datetime.timedelta(days=10), 
             end_date=datetime.date.today()
