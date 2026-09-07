@@ -46,41 +46,35 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
         )
         conn.commit()
 
+import requests
+
 def populate_missing_history(isin: str, first_order_date: datetime.date):
-    """
-    Descarga el historial completo si detecta que faltan datos diarios en SQLite.
-    """
     existing_navs = get_stored_nav_map(isin)
-    
-    # Ampliamos a 100 para asegurar que exija una serie continua, no solo las fechas de compra
     if len(existing_navs) > 100:
         return
 
     try:
-        print(f"[{isin}] Descargando histórico desde Morningstar...")
-        start_date = first_order_date - datetime.timedelta(days=30)
-        end_date = datetime.date.today()
+        print(f"[{isin}] Descargando histórico vía API directa...")
+        # Morningstar endpoint público para gráficos de rendimiento
+        url = f"https://globaldata.morningstar.com/europeanrs/pricehistoryservice.ashx?id={isin}&securityToken=&frequency=daily&startDate={first_order_date.strftime('%Y-%m-%d')}&endDate={datetime.date.today().strftime('%Y-%m-%d')}&outputType=json"
         
-        fund = mstarpy.Funds(term=isin)
-        history = fund.historicalData(start_date=start_date, end_date=end_date)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
         
-        # Corrección: mstarpy devuelve una lista de diccionarios directamente
-        if history and isinstance(history, list):
-            for item in history:
-                if 'date' in item and 'nav' in item:
-                    date_val = item['date']
-                    if isinstance(date_val, str):
-                        date_str = date_val.split('T')[0]
-                    else:
-                        date_str = date_val.strftime('%Y-%m-%d')
-                    
-                    nav_val = float(item['nav'])
-                    save_nav_to_db(isin, date_str, nav_val)
-            print(f"[{isin}] Histórico diario guardado con éxito.")
-            
+        if response.status_code == 200:
+            data = response.json()
+            # Parsear datos de la respuesta de Morningstar
+            for row in data:
+                # Dependiendo del formato JSON devuelto
+                date_str = row.get('Date') or row.get('date')
+                nav_val = row.get('Nav') or row.get('nav')
+                if date_str and nav_val:
+                    clean_date = date_str.split('T')[0]
+                    save_nav_to_db(isin, clean_date, float(nav_val))
+            print(f"[{isin}] Histórico descargado correctamente.")
     except Exception as e:
-        print(f"Aviso: No se pudo descargar historial de Morningstar para {isin}: {e}")
-
+        print(f"Aviso: Falló la descarga directa para {isin}: {e}")
+        
 # --- FONDOS Y METADATOS ---
 KNOWN_FUNDS = {
     'IE000ZYRH0Q7': {
