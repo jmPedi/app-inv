@@ -48,17 +48,16 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
 
 def populate_missing_history(isin: str, first_order_date: datetime.date):
     """
-    Descarga el historial de NAVs desde Morningstar desde la primera compra hasta hoy
-    y lo almacena en SQLite. Solo ejecuta si no hay datos guardados previamente.
+    Descarga el historial completo si detecta que faltan datos en la base de datos.
     """
     existing_navs = get_stored_nav_map(isin)
     
-    # Si la tabla ya tiene más de 15 días guardados para este ISIN, no consulta la API externa
-    if len(existing_navs) > 15:
+    # Ampliamos el margen a 100 días para asegurar que descargue la serie continua,
+    # no solo los días sueltos de tus compras.
+    if len(existing_navs) > 100:
         return
 
     try:
-        # Definir rango dinámico: desde 30 días antes de la primera compra hasta hoy
         start_date = first_order_date - datetime.timedelta(days=30)
         end_date = datetime.date.today()
         
@@ -162,7 +161,6 @@ def parse_date(date_str: str) -> datetime.date:
 
 def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
     now = datetime.datetime.now()
-    today_str = datetime.date.today().strftime('%d/%m/%Y')
 
     if not force_refresh and isin in NAV_CACHE:
         cache_item = NAV_CACHE[isin]
@@ -170,66 +168,62 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
             return cache_item['data']
 
     try:
+        # 1. Traer solo el último NAV de mercado para mantener la BBDD al día
         fund = mstarpy.Funds(term=isin, country='es')
         market_data = fund.historicalData(
-            start_date=datetime.date.today() - datetime.timedelta(days=14), 
+            start_date=datetime.date.today() - datetime.timedelta(days=10), 
             end_date=datetime.date.today()
         )
-        
         if market_data and 'nav' in market_data and len(market_data['nav']) > 0:
-            navs_list = market_data['nav']
-            last_entry = navs_list[-1]
-            live_nav = float(last_entry['nav'])
-            live_date_str = last_entry['date'].split('T')[0]
-            
-            # Calcular variaciones reales si hay suficientes datos históricos
-            d1, w1, m1, y1 = 0.0, 0.0, 0.0, None
-            if len(navs_list) >= 2:
-                prev_nav = float(navs_list[-2]['nav'])
-                d1 = round(((live_nav - prev_nav) / prev_nav) * 100, 2)
-            if len(navs_list) >= 7:
-                week_nav = float(navs_list[-7]['nav'])
-                w1 = round(((live_nav - week_nav) / week_nav) * 100, 2)
-            if len(navs_list) >= 30:
-                month_nav = float(navs_list[-30]['nav'])
-                m1 = round(((live_nav - month_nav) / month_nav) * 100, 2)
-            if len(navs_list) >= 250:
-                year_nav = float(navs_list[-250]['nav'])
-                y1 = round(((live_nav - year_nav) / year_nav) * 100, 2)
-
-            result = {
-                'nav': live_nav, 
-                'date': live_date_str, 
-                'd1': d1, 'w1': w1, 'm1': m1, 'y1': y1
-            }
-            
-            NAV_CACHE[isin] = {'time': now, 'data': result}
-            save_nav_to_db(isin, live_date_str, live_nav)
-            return result
-            
+            last_entry = market_data['nav'][-1]
+            save_nav_to_db(isin, last_entry['date'].split('T')[0], float(last_entry['nav']))
     except Exception as e:
-        print(f"Aviso: No se pudo conectar a Morningstar para {isin}: {e}")
+        print(f"Aviso: No se pudo actualizar NAV de hoy para {isin}: {e}")
 
-    # Fallback a SQLite si la API externa falla
+    # 2. Calcular todas las variaciones leyendo la BBDD local completa
     db_navs = get_stored_nav_map(isin)
-    if db_navs:
-        last_date = max(db_navs.keys())
-        result = {
-            'nav': db_navs[last_date], 
-            'date': last_date, 
-            'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None
-        }
-        NAV_CACHE[isin] = {'time': now, 'data': result}
-        return result
+    if not db_navs:
+        return {'nav': 0.0, 'date': '-', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None}
 
-    # Valores de respaldo fijos si no hay red ni base de datos
-    defaults = {
-        'IE000ZYRH0Q7': {'nav': 12.2550, 'date': today_str, 'd1': 0.12, 'w1': 0.85, 'm1': 2.30, 'y1': 24.80},
-        'IE000QAZP7L2': {'nav': 13.7970, 'date': today_str, 'd1': -0.08, 'w1': 0.42, 'm1': 1.15, 'y1': 12.40},
-        'ES0146309002': {'nav': 221.61, 'date': today_str, 'd1': 0.25, 'w1': 1.10, 'm1': 3.40, 'y1': 16.80},
-        'LU3256039929': {'nav': 522.40, 'date': today_str, 'd1': 0.10, 'w1': 0.60, 'm1': 1.95, 'y1': None}
+    # Ordenar fechas para cálculos
+    nav_by_date_obj = {datetime.datetime.strptime(d, '%Y-%m-%d').date(): v for d, v in db_navs.items()}
+    sorted_dates = sorted(nav_by_date_obj.keys())
+    
+    latest_obj = sorted_dates[-1]
+    live_nav = nav_by_date_obj[latest_obj]
+    latest_date_str = latest_obj.strftime('%Y-%m-%d')
+
+    # Función auxiliar para buscar el NAV más cercano a X días atrás
+    def get_closest_nav(target_days_ago):
+        target = latest_obj - datetime.timedelta(days=target_days_ago)
+        for i in range(7): # Buscar hasta 7 días atrás (fines de semana/festivos)
+            check_date = target - datetime.timedelta(days=i)
+            if check_date in nav_by_date_obj:
+                return nav_by_date_obj[check_date]
+        return None
+
+    # Variación 1 Día (el día inmediatamente anterior registrado)
+    prev_nav = nav_by_date_obj[sorted_dates[-2]] if len(sorted_dates) >= 2 else live_nav
+    d1 = round(((live_nav - prev_nav) / prev_nav) * 100, 2) if prev_nav else 0.0
+
+    # Variación 1 Semana, 1 Mes, 1 Año
+    week_nav = get_closest_nav(7)
+    w1 = round(((live_nav - week_nav) / week_nav) * 100, 2) if week_nav else 0.0
+
+    month_nav = get_closest_nav(30)
+    m1 = round(((live_nav - month_nav) / month_nav) * 100, 2) if month_nav else 0.0
+
+    year_nav = get_closest_nav(365)
+    y1 = round(((live_nav - year_nav) / year_nav) * 100, 2) if year_nav else None
+
+    result = {
+        'nav': live_nav, 
+        'date': latest_date_str, 
+        'd1': d1, 'w1': w1, 'm1': m1, 'y1': y1
     }
-    return defaults.get(isin, {'nav': 100.0, 'date': 'Hoy', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None})
+    
+    NAV_CACHE[isin] = {'time': now, 'data': result}
+    return result
 
 def get_row_value(row: Dict[str, Any], candidate_keys: List[str]) -> str:
     normalized_row = {k.strip().lower().replace('"', '').replace("'", ''): v for k, v in row.items()}
