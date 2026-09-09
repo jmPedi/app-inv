@@ -1,5 +1,3 @@
-﻿fastapi>=0.110.0
+fastapi>=0.110.0
 uvicorn>=0.28.0
-openpyxl>=3.1.2
-mstarpy>=11.0.0
-pandas>=2.2.0
+requests>=2.31.0

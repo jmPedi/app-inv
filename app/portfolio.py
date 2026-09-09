@@ -1,10 +1,12 @@
 import os
 import glob
 import csv
+import re
+import time
 import datetime
 import sqlite3
 from typing import Dict, List, Any
-import mstarpy
+import requests
 
 # --- CONFIGURACIÓN DE RUTAS Y BASE DE DATOS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,27 +48,90 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
         )
         conn.commit()
 
-# --- OBTENCIÓN DE NAVS DESDE MSTARPY (API ACTUAL) ---
-def fetch_nav_history_mstarpy(isin: str, start_date: datetime.date, end_date: datetime.date) -> List[Dict[str, Any]]:
-    """Devuelve la lista de NAVs diarios {date, nav} usando la API actual de mstarpy (v11+).
+# --- OBTENCIÓN DE NAVS DESDE MORNINGSTAR (API DIRECTA, SIN SELENIUM) ---
+# mstarpy v11 necesita Selenium/Chrome para resolver el ISIN, lo que no funciona
+# en el contenedor Docker (sin navegador). En su lugar se llama directamente al
+# endpoint de series con el código de seguridad de Morningstar pre-resuelto.
+SECURITY_CODES = {
+    'IE000ZYRH0Q7': 'F00001SELX',
+    'IE000QAZP7L2': 'F00001SELW',
+    'ES0146309002': 'F000010KY6',
+    # 'LU3256039929' (Silverway): no está indexado en Morningstar, se usa el fallback de SQLite
+}
 
-    El endpoint histórico antiguo (globaldata.morningstar.com) ya no existe, por lo que
-    se usa el método nav() de mstarpy, que consulta api-global.morningstar.com.
-    Devuelve [] si el fondo no se puede resolver (p.ej. fondos nicho no indexados).
+_token_cache: Dict[str, Any] = {}
+
+def _get_mstar_token() -> str:
+    """Obtiene el Bearer token de Morningstar scrapeándolo de su página de chart (cacheado 1h).
+
+    Morningstar a veces responde con un challenge WAF (status 202). En ese caso se devuelve
+    el token, si lo hay, o se lanza; el llamador usa el histórico de SQLite como respaldo.
     """
-    fund = mstarpy.Funds(term=isin)
-    navs = fund.nav(
-        start_date=datetime.datetime.combine(start_date, datetime.time.min),
-        end_date=datetime.datetime.combine(end_date, datetime.time.min),
-        frequency='daily'
-    )
-    result = []
-    for entry in navs or []:
-        date_str = entry.get('date')
-        nav_val = entry.get('nav') or entry.get('totalReturn')
-        if date_str and nav_val:
-            result.append({'date': date_str.split('T')[0], 'nav': float(nav_val)})
-    return result
+    now = datetime.datetime.now()
+    cached = _token_cache.get('token')
+    cached_time = _token_cache.get('time')
+    if cached and cached_time and (now - cached_time).total_seconds() < 3600:
+        return cached
+
+    url = 'https://www.morningstar.com/funds/xnas/afozx/chart'
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'}
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            m = re.search(r'token:"([A-Za-z0-9\-_\.]+)"', resp.text)
+            if m:
+                _token_cache['token'] = m.group(1)
+                _token_cache['time'] = now
+                return m.group(1)
+            last_error = f'No token en respuesta (status={resp.status_code})'
+        except Exception as e:
+            last_error = str(e)
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    _token_cache['challenge_until'] = now + datetime.timedelta(minutes=10)
+    raise RuntimeError(f'No se pudo obtener el token de Morningstar: {last_error}')
+
+def fetch_nav_history_mstarpy(isin: str, start_date: datetime.date, end_date: datetime.date) -> List[Dict[str, Any]]:
+    """Devuelve la lista de NAVs diarios {date, nav} del endpoint público de Morningstar.
+
+    Lanza ValueError si el ISIN no tiene código de seguridad asignado (p.ej. Silverway),
+    el llamador lo captura y usa el histórico almacenado en SQLite.
+    """
+    code = SECURITY_CODES.get(isin)
+    if not code:
+        raise ValueError(f'No hay código de seguridad de Morningstar para {isin}')
+
+    url = 'https://www.us-api.morningstar.com/QS-markets/chartservice/v2/timeseries'
+    params = {
+        'query': f'{code}:nav',
+        'frequency': 'd',
+        'startDate': start_date.strftime('%Y-%m-%d'),
+        'endDate': end_date.strftime('%Y-%m-%d'),
+        'trackMarketData': '3.6.3',
+        'instid': 'DOTCOM',
+    }
+
+    for attempt in range(2):
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
+            'Authorization': f"Bearer {_get_mstar_token()}",
+            'Accept': 'application/json',
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        if resp.status_code in (401, 403) and attempt == 0:
+            _token_cache.clear()
+            continue
+        resp.raise_for_status()
+        break
+
+    data = resp.json()
+    rows = data[0]['series'] if data and isinstance(data, list) else []
+    return [
+        {'date': row['date'], 'nav': float(row['nav'])}
+        for row in rows
+        if row.get('nav') is not None
+    ]
 
 def populate_missing_history(isin: str, first_order_date: datetime.date):
     existing_navs = get_stored_nav_map(isin)
@@ -74,7 +139,7 @@ def populate_missing_history(isin: str, first_order_date: datetime.date):
         return
 
     try:
-        print(f"[{isin}] Descargando histórico vía mstarpy...")
+        print(f"[{isin}] Descargando histórico de Morningstar...")
         navs = fetch_nav_history_mstarpy(
             isin, first_order_date, datetime.date.today()
         )

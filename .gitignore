@@ -5,6 +5,7 @@ __pycache__/
 # Datos personales de la cartera (no subir a GitHub)
 IN/
 data/
+*.db
 
 # Claude Code
 .claude/
