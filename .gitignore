@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Datos personales de la cartera (no subir a GitHub)
+IN/
+data/
+
+# Claude Code
+.claude/

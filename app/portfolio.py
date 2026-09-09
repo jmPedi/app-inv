@@ -46,7 +46,27 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
         )
         conn.commit()
 
-import requests
+# --- OBTENCIÓN DE NAVS DESDE MSTARPY (API ACTUAL) ---
+def fetch_nav_history_mstarpy(isin: str, start_date: datetime.date, end_date: datetime.date) -> List[Dict[str, Any]]:
+    """Devuelve la lista de NAVs diarios {date, nav} usando la API actual de mstarpy (v11+).
+
+    El endpoint histórico antiguo (globaldata.morningstar.com) ya no existe, por lo que
+    se usa el método nav() de mstarpy, que consulta api-global.morningstar.com.
+    Devuelve [] si el fondo no se puede resolver (p.ej. fondos nicho no indexados).
+    """
+    fund = mstarpy.Funds(term=isin)
+    navs = fund.nav(
+        start_date=datetime.datetime.combine(start_date, datetime.time.min),
+        end_date=datetime.datetime.combine(end_date, datetime.time.min),
+        frequency='daily'
+    )
+    result = []
+    for entry in navs or []:
+        date_str = entry.get('date')
+        nav_val = entry.get('nav') or entry.get('totalReturn')
+        if date_str and nav_val:
+            result.append({'date': date_str.split('T')[0], 'nav': float(nav_val)})
+    return result
 
 def populate_missing_history(isin: str, first_order_date: datetime.date):
     existing_navs = get_stored_nav_map(isin)
@@ -54,26 +74,18 @@ def populate_missing_history(isin: str, first_order_date: datetime.date):
         return
 
     try:
-        print(f"[{isin}] Descargando histórico vía API directa...")
-        # Morningstar endpoint público para gráficos de rendimiento
-        url = f"https://globaldata.morningstar.com/europeanrs/pricehistoryservice.ashx?id={isin}&securityToken=&frequency=daily&startDate={first_order_date.strftime('%Y-%m-%d')}&endDate={datetime.date.today().strftime('%Y-%m-%d')}&outputType=json"
-        
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # Parsear datos de la respuesta de Morningstar
-            for row in data:
-                # Dependiendo del formato JSON devuelto
-                date_str = row.get('Date') or row.get('date')
-                nav_val = row.get('Nav') or row.get('nav')
-                if date_str and nav_val:
-                    clean_date = date_str.split('T')[0]
-                    save_nav_to_db(isin, clean_date, float(nav_val))
-            print(f"[{isin}] Histórico descargado correctamente.")
+        print(f"[{isin}] Descargando histórico vía mstarpy...")
+        navs = fetch_nav_history_mstarpy(
+            isin, first_order_date, datetime.date.today()
+        )
+        if not navs:
+            print(f"Aviso: No se pudo resolver el histórico para {isin}")
+            return
+        for item in navs:
+            save_nav_to_db(isin, item['date'], item['nav'])
+        print(f"[{isin}] Histórico descargado correctamente ({len(navs)} registros).")
     except Exception as e:
-        print(f"Aviso: Falló la descarga directa para {isin}: {e}")
+        print(f"Aviso: Falló la descarga del histórico para {isin}: {e}")
         
 # --- FONDOS Y METADATOS ---
 KNOWN_FUNDS = {
@@ -169,18 +181,13 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
         if (now - cache_item['time']).total_seconds() < 900:
             return cache_item['data']
 
-    # 1. Actualizar el último dato disponible de hoy
+    # 1. Actualizar el histórico reciente (cubre los ~400 días para calcular variaciones)
     try:
-        fund = mstarpy.Funds(term=isin)
-        market_data = fund.historicalData(
-            start_date=datetime.date.today() - datetime.timedelta(days=10), 
-            end_date=datetime.date.today()
+        recent = fetch_nav_history_mstarpy(
+            isin, datetime.date.today() - datetime.timedelta(days=400), datetime.date.today()
         )
-        if market_data and isinstance(market_data, list) and len(market_data) > 0:
-            last_entry = market_data[-1]
-            date_val = last_entry['date']
-            date_str = date_val.split('T')[0] if isinstance(date_val, str) else date_val.strftime('%Y-%m-%d')
-            save_nav_to_db(isin, date_str, float(last_entry['nav']))
+        for item in recent:
+            save_nav_to_db(isin, item['date'], item['nav'])
     except Exception as e:
         pass 
 
