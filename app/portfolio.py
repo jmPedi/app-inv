@@ -1,6 +1,4 @@
 import os
-import glob
-import csv
 import re
 import time
 import datetime
@@ -14,7 +12,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "portfolio_history.db")
 
 def init_db():
-    """Inicializa la base de datos SQLite para almacenar el historial de NAVs."""
+    """Inicializa la base de datos SQLite con las tablas nav_history y operaciones."""
     os.makedirs(DATA_DIR, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
@@ -23,6 +21,20 @@ def init_db():
                 fecha TEXT NOT NULL,
                 nav REAL NOT NULL,
                 PRIMARY KEY (isin, fecha)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS operaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                isin TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                importe REAL NOT NULL,
+                participaciones REAL NOT NULL,
+                precio_titulo REAL NOT NULL,
+                tipo TEXT NOT NULL DEFAULT 'Compra',
+                operador TEXT,
+                fuente TEXT NOT NULL DEFAULT 'manual',
+                UNIQUE(fecha, isin, participaciones, importe)
             )
         """)
         conn.commit()
@@ -47,6 +59,59 @@ def save_nav_to_db(isin: str, fecha_str: str, nav: float):
             (isin, fecha_str, nav)
         )
         conn.commit()
+
+def insert_operacion(isin: str, fecha: str, importe: float, participaciones: float,
+                     precio_titulo: float = 0.0, operador: str = '', fuente: str = 'manual',
+                     tipo: str = 'Compra') -> int:
+    """Inserta una operación en la tabla `operaciones`. Devuelve el id creado.
+
+    Salta si ya existe la misma operación (clave UNIQUE fecha+isin+participaciones+importe).
+    Si falta precio, se deriva de importe/participaciones.
+    """
+    if importe <= 0 or participaciones <= 0:
+        raise ValueError('Importe y participaciones deben ser mayores que 0')
+    precio = precio_titulo if precio_titulo > 0 else (importe / participaciones)
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO operaciones (isin, fecha, importe, participaciones, precio_titulo, tipo, operador, fuente) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (isin, fecha, round(importe, 2), round(participaciones, 4),
+                 round(precio, 4), tipo, operador or None, fuente)
+            )
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            return 0  # ya existía (duplicada)
+
+def get_all_operaciones() -> List[Dict[str, Any]]:
+    """Devuelve todas las operaciones de la tabla, ordenadas por fecha descendente."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, isin, fecha, importe, participaciones, precio_titulo, tipo, operador, fuente "
+            "FROM operaciones ORDER BY fecha DESC, id DESC"
+        ).fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            'id': r[0], 'isin': r[1], 'fecha': r[2], 'importe': r[3],
+            'participaciones': r[4], 'precio_titulo': r[5], 'tipo': r[6],
+            'operador': r[7] or '', 'fuente': r[8]
+        })
+    return result
+
+def compra_existe_alta(isin: str, fecha: str, importe: float, participaciones: float) -> bool:
+    """Comprueba si una compra ya está registrada (misma fecha+isin, importe y participaciones)."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id FROM operaciones WHERE fecha = ? AND isin = ? "
+            "AND ROUND(participaciones, 4) = ROUND(?, 4) AND ROUND(importe, 2) = ROUND(?, 2)",
+            (fecha, isin, participaciones, importe)
+        ).fetchone()
+        return row is not None
 
 # --- OBTENCIÓN DE NAVS DESDE MORNINGSTAR (API DIRECTA, SIN SELENIUM) ---
 # mstarpy v11 necesita Selenium/Chrome para resolver el ISIN, lo que no funciona
@@ -133,25 +198,6 @@ def fetch_nav_history_mstarpy(isin: str, start_date: datetime.date, end_date: da
         if row.get('nav') is not None
     ]
 
-def populate_missing_history(isin: str, first_order_date: datetime.date):
-    existing_navs = get_stored_nav_map(isin)
-    if len(existing_navs) > 100:
-        return
-
-    try:
-        print(f"[{isin}] Descargando histórico de Morningstar...")
-        navs = fetch_nav_history_mstarpy(
-            isin, first_order_date, datetime.date.today()
-        )
-        if not navs:
-            print(f"Aviso: No se pudo resolver el histórico para {isin}")
-            return
-        for item in navs:
-            save_nav_to_db(isin, item['date'], item['nav'])
-        print(f"[{isin}] Histórico descargado correctamente ({len(navs)} registros).")
-    except Exception as e:
-        print(f"Aviso: Falló la descarga del histórico para {isin}: {e}")
-        
 # --- FONDOS Y METADATOS ---
 KNOWN_FUNDS = {
     'IE000ZYRH0Q7': {
@@ -205,7 +251,6 @@ KNOWN_FUNDS = {
 }
 
 ACTIVE_ISINS = ['IE000ZYRH0Q7', 'IE000QAZP7L2', 'ES0146309002', 'LU3256039929']
-NAV_CACHE: Dict[str, Dict[str, Any]] = {}
 
 # --- FUNCIONES AUXILIARES ---
 def parse_float(val: Any) -> float:
@@ -238,25 +283,9 @@ def parse_date(date_str: str) -> datetime.date:
             pass
     return datetime.date(2000, 1, 1)
 
-def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
-    now = datetime.datetime.now()
-
-    if not force_refresh and isin in NAV_CACHE:
-        cache_item = NAV_CACHE[isin]
-        if (now - cache_item['time']).total_seconds() < 900:
-            return cache_item['data']
-
-    # 1. Actualizar el histórico reciente (cubre los ~400 días para calcular variaciones)
-    try:
-        recent = fetch_nav_history_mstarpy(
-            isin, datetime.date.today() - datetime.timedelta(days=400), datetime.date.today()
-        )
-        for item in recent:
-            save_nav_to_db(isin, item['date'], item['nav'])
-    except Exception as e:
-        pass 
-
-    # 2. Calcular variaciones leyendo todo el histórico local de SQLite
+def fetch_market_nav(isin: str) -> Dict[str, Any]:
+    # Solo lectura: calcula variaciones leyendo el histórico local de SQLite.
+    # La actualización de NAVs corre en el flujo de escritura (app/update_navs.py).
     db_navs = get_stored_nav_map(isin)
     if not db_navs:
         return {'nav': 0.0, 'date': '-', 'd1': 0.0, 'w1': 0.0, 'm1': 0.0, 'y1': None}
@@ -294,11 +323,9 @@ def fetch_market_nav(isin: str, force_refresh: bool = False) -> Dict[str, Any]:
 
     result = {
         'nav': live_nav, 
-        'date': latest_date_str, 
+        'date': latest_date_str,
         'd1': d1, 'w1': w1, 'm1': m1, 'y1': y1
     }
-    
-    NAV_CACHE[isin] = {'time': now, 'data': result}
     return result
 
 def get_row_value(row: Dict[str, Any], candidate_keys: List[str]) -> str:
@@ -309,67 +336,29 @@ def get_row_value(row: Dict[str, Any], candidate_keys: List[str]) -> str:
             return str(normalized_row[clean_ck]).strip()
     return ''
 
-def load_all_orders(in_dir: str) -> Dict[str, List[Dict[str, Any]]]:
-    csv_files = glob.glob(os.path.join(in_dir, '*.csv'))
-    if not csv_files:
-        parent = os.path.dirname(in_dir)
-        csv_files = glob.glob(os.path.join(parent, '*.csv'))
+def load_all_orders() -> Dict[str, List[Dict[str, Any]]]:
+    """Lee las operaciones de la tabla `operaciones` (CSV sincronizado + altas manuales).
 
+    Devuelve dict agrupado por ISIN, cada lista ordenada cronológicamente.
+    """
+    ops = get_all_operaciones()
     orders_by_isin: Dict[str, List[Dict[str, Any]]] = {}
-    seen = set()
 
-    for path in csv_files:
-        try:
-            with open(path, 'r', encoding='utf-8-sig') as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            with open(path, 'r', encoding='latin-1') as f:
-                content = f.read()
-
-        delimiter = ';' if ';' in content else ','
-        reader = csv.DictReader(content.splitlines(), delimiter=delimiter)
-
-        for row in reader:
-            estado = get_row_value(row, ['estado', 'status'])
-            if estado.lower() != 'finalizada':
-                continue
-
-            isin = get_row_value(row, ['isin', 'fondo'])
-            if not isin:
-                continue
-
-            fecha = get_row_value(row, ['fecha de la orden', 'fecha de operación', 'fecha'])
-            importe = parse_float(get_row_value(row, ['importe estimado', 'importe', 'monto']))
-            participaciones = parse_float(get_row_value(row, ['nº de participaciones', 'participaciones']))
-            precio_unit = parse_float(get_row_value(row, ['precio titulo', 'precio titulo compra', 'precio']))
-
-            if participaciones <= 0 and importe <= 0:
-                continue
-
-            dedup_key = (fecha, isin, round(participaciones, 4), round(importe, 2))
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-
-            if isin not in orders_by_isin:
-                orders_by_isin[isin] = []
-
-            nav_op = precio_unit if precio_unit > 0 else ((importe / participaciones) if participaciones > 0 else 0.0)
-            dt = parse_date(fecha)
-
-            if isin and nav_op > 0 and dt.year >= 2020:
-                save_nav_to_db(isin, dt.strftime('%Y-%m-%d'), nav_op)
-
-            orders_by_isin[isin].append({
-                'fecha': fecha,
-                'date_obj': dt,
-                'isin': isin,
-                'importe': importe,
-                'participaciones': participaciones,
-                'nav_operacion': round(nav_op, 4),
-                'tipo': get_row_value(row, ['tipo operación', 'tipo']) or 'Compra',
-                'operador': get_row_value(row, ['operador']) or KNOWN_FUNDS.get(isin, {}).get('operador', 'myInvestor')
-            })
+    for op in ops:
+        isin = op['isin']
+        dt = datetime.datetime.strptime(op['fecha'], '%Y-%m-%d').date()
+        if isin not in orders_by_isin:
+            orders_by_isin[isin] = []
+        orders_by_isin[isin].append({
+            'fecha': op['fecha'],
+            'date_obj': dt,
+            'isin': isin,
+            'importe': op['importe'],
+            'participaciones': op['participaciones'],
+            'nav_operacion': op['precio_titulo'],
+            'tipo': op['tipo'] or 'Compra',
+            'operador': op['operador'] or KNOWN_FUNDS.get(isin, {}).get('operador', 'myInvestor')
+        })
 
     for isin in orders_by_isin:
         orders_by_isin[isin].sort(key=lambda x: x['date_obj'])
@@ -384,10 +373,7 @@ def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], start_date
     sorted_orders = sorted(orders, key=lambda x: x['date_obj'])
     fund_start = sorted_orders[0]['date_obj']
 
-    # 1. Rellenar historial dinámico en SQLite
-    populate_missing_history(isin, fund_start)
-
-    # 2. Cargar datos de SQLite
+    # Cargar datos de SQLite (el histórico ya lo mantiene el flujo de actualización)
     db_navs = get_stored_nav_map(isin)
 
     events_by_date: Dict[datetime.date, List[Dict[str, Any]]] = {}
@@ -411,10 +397,6 @@ def generate_fund_timeseries(isin: str, orders: List[Dict[str, Any]], start_date
 
         if d_str in db_navs and db_navs[d_str] > 0:
             last_known_nav = db_navs[d_str]
-        elif cur == today:
-            market = fetch_market_nav(isin)
-            if market and market.get('nav'):
-                last_known_nav = market['nav']
 
         val = cur_parts * last_known_nav
         gain_eur = val - cur_inv if cur_inv > 0 else 0.0
@@ -475,8 +457,8 @@ def generate_timeseries(orders: Dict[str, List[Dict[str, Any]]]) -> Dict[str, An
         'funds': fund_series
     }
 
-def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str, Any]:
-    orders = load_all_orders(in_dir)
+def get_portfolio_summary() -> Dict[str, Any]:
+    orders = load_all_orders()
     funds = []
     tot_invested = 0.0
     tot_value = 0.0
@@ -511,7 +493,7 @@ def get_portfolio_summary(in_dir: str, force_refresh: bool = False) -> Dict[str,
         first_date = fund_orders[0]['date_obj'] if fund_orders else today
         days_active = (today - first_date).days if first_date.year >= 2020 else 0
 
-        market_info = fetch_market_nav(isin, force_refresh=force_refresh) if is_active else {'nav': 0.0, 'date': '-', 'd1': 0, 'w1': 0, 'm1': 0, 'y1': None}
+        market_info = fetch_market_nav(isin) if is_active else {'nav': 0.0, 'date': '-', 'd1': 0, 'w1': 0, 'm1': 0, 'y1': None}
         curr_nav = market_info['nav']
         curr_val = total_parts * curr_nav if is_active else 0.0
         

@@ -70,11 +70,11 @@ async function loadData(forceRefresh = false) {
   if (btn) {
     btn.style.opacity = '0.6';
     if (spinner) spinner.style.animation = 'spin 1s linear infinite';
-    if (text && forceRefresh) text.textContent = 'Consultando mercado...';
+    if (text && forceRefresh) text.textContent = 'Leyendo datos...';
   }
 
   try {
-    const url = forceRefresh ? '/api/portfolio?refresh=true' : '/api/portfolio';
+    const url = '/api/portfolio';
     const res = await fetch(url);
     if (!res.ok) throw new Error('Error al conectar con la API');
     globalData = await res.json();
@@ -403,7 +403,118 @@ function toggleSection(contentId, iconId) {
   }
 }
 
+function openPurchaseModal() {
+  document.getElementById('purchaseIsin').value = '';
+  document.getElementById('purchaseFecha').value = new Date().toISOString().split('T')[0];
+  document.getElementById('purchaseImporte').value = '';
+  document.getElementById('purchaseParticipaciones').value = '';
+  document.getElementById('purchasePrecio').value = '';
+  document.getElementById('purchaseOperador').value = '';
+  document.getElementById('purchaseMsg').textContent = '';
+  document.getElementById('newPurchaseModal').classList.remove('hidden');
+  document.getElementById('newPurchaseOverlay').classList.remove('hidden');
+  document.getElementById('purchaseIsin').focus();
+}
+
+function closePurchaseModal() {
+  document.getElementById('newPurchaseModal').classList.add('hidden');
+  document.getElementById('newPurchaseOverlay').classList.add('hidden');
+}
+
+const isinOperadores = {
+  'IE000ZYRH0Q7': 'myInvestor',
+  'IE000QAZP7L2': 'myInvestor',
+  'ES0146309002': 'Horos',
+  'LU3256039929': 'Silverway'
+};
+
+async function submitPurchase() {
+  const isinInput = document.getElementById('purchaseIsin');
+  const fechaVal = document.getElementById('purchaseFecha').value;
+  const importeVal = parseFloat(document.getElementById('purchaseImporte').value);
+  const partVal = parseFloat(document.getElementById('purchaseParticipaciones').value);
+  const precioVal = document.getElementById('purchasePrecio').value;
+  const operadorVal = document.getElementById('purchaseOperador').value.trim();
+  const msgEl = document.getElementById('purchaseMsg');
+  const saveBtn = document.getElementById('savePurchaseBtn');
+
+  msgEl.textContent = '';
+
+  const isin = isinInput.value.trim().toUpperCase();
+
+  if (!isin || !fechaVal || isNaN(importeVal) || importeVal <= 0 || isNaN(partVal) || partVal <= 0) {
+    msgEl.textContent = 'Completa ISIN, Fecha, Importe (>0) y Participaciones (>0).';
+    return;
+  }
+
+  const body = {
+    isin: isin,
+    fecha: fechaVal,
+    importe: importeVal,
+    participaciones: partVal
+  };
+  if (precioVal !== '') body.precio_titulo = parseFloat(precioVal);
+  if (operadorVal) body.operador = operadorVal;
+
+  saveBtn.disabled = true;
+  saveBtn.style.opacity = '0.6';
+  try {
+    const res = await fetch('/api/operaciones', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (res.ok) {
+      closePurchaseModal();
+      loadData();
+      return;
+    }
+
+    let detail = 'Error inesperado.';
+    try {
+      const data = await res.json();
+      if (data && data.detail) detail = data.detail;
+    } catch (e) { /* ignore */ }
+
+    if (res.status === 409 || res.status === 422) {
+      msgEl.textContent = detail;
+    } else {
+      msgEl.textContent = 'Error al registrar la compra. Inténtalo de nuevo.';
+    }
+  } catch (err) {
+    console.error(err);
+    msgEl.textContent = 'Error de conexión. No se pudo guardar la compra.';
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.style.opacity = '1';
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initGlobalTooltip();
   loadData(false);
+
+  // Modal alta de compra
+  document.getElementById('newPurchaseBtn').addEventListener('click', openPurchaseModal);
+  document.getElementById('cancelPurchaseBtn').addEventListener('click', closePurchaseModal);
+  document.getElementById('newPurchaseOverlay').addEventListener('click', function(e) {
+    if (e.target === this) closePurchaseModal();
+  });
+  document.getElementById('savePurchaseBtn').addEventListener('click', submitPurchase);
+
+  // Autocompletar operador según ISIN
+  document.getElementById('purchaseIsin').addEventListener('input', function() {
+    const isin = this.value.trim().toUpperCase();
+    const operadorInput = document.getElementById('purchaseOperador');
+    if (isinOperadores[isin]) {
+      if (operadorInput.value === '' || operadorInput.value === operadorInput.dataset.prefill) {
+        operadorInput.value = isinOperadores[isin];
+        operadorInput.dataset.prefill = isinOperadores[isin];
+      }
+    } else if (operadorInput.value === operadorInput.dataset.prefill) {
+      operadorInput.value = '';
+      delete operadorInput.dataset.prefill;
+    }
+  });
 });

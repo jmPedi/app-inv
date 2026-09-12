@@ -17,6 +17,7 @@
         <p class="subtitle">MyInvestor · Horos · Silverway</p>
       </div>
       <div class="header-actions">
+        <button id="newPurchaseBtn" class="btn-refresh" type="button">+ Nueva Compra</button>
         <button id="refreshBtn" class="btn-refresh" onclick="loadData(true)">
           <span id="refreshSpinner" class="refresh-icon">↻</span> <span id="refreshText">Actualizar Precios</span>
         </button>
@@ -257,6 +258,51 @@
       <span>Carpeta de sincronización: <code>c:\Users\JmPed\trabajo\inversion\IN</code></span>
     </footer>
   </div>
+
+  <!-- Modal Alta de Compra -->
+  <div id="newPurchaseOverlay" class="modal-overlay hidden">
+    <div id="newPurchaseModal" class="modal-box" role="dialog" aria-modal="true" aria-labelledby="newPurchaseTitle">
+      <h3 id="newPurchaseTitle">Registrar Compra</h3>
+      <div>
+        <label for="purchaseIsin">Fondo / ISIN</label>
+        <input type="text" id="purchaseIsin" list="isinSuggestions" autocomplete="off" placeholder="P. ej. IE000ZYRH0Q7" />
+        <datalist id="isinSuggestions">
+          <option value="IE000ZYRH0Q7">iShares Developed World</option>
+          <option value="IE000QAZP7L2">iShares Emerging Markets</option>
+          <option value="ES0146309002">Horos Value Internacional</option>
+          <option value="LU3256039929">Silverway Global Apex</option>
+        </datalist>
+      </div>
+      <div class="form-grid">
+        <div>
+          <label for="purchaseFecha">Fecha</label>
+          <input type="date" id="purchaseFecha" />
+        </div>
+        <div>
+          <label for="purchaseImporte">Importe (€)</label>
+          <input type="number" step="0.01" id="purchaseImporte" />
+        </div>
+        <div>
+          <label for="purchaseParticipaciones">Participaciones</label>
+          <input type="number" step="0.0001" id="purchaseParticipaciones" />
+        </div>
+        <div>
+          <label for="purchasePrecio">Precio Título (€) (opcional)</label>
+          <input type="number" step="0.0001" id="purchasePrecio" />
+        </div>
+      </div>
+      <div>
+        <label for="purchaseOperador">Operador</label>
+        <input type="text" id="purchaseOperador" placeholder="p. ej. myInvestor" />
+      </div>
+      <div id="purchaseMsg" class="msg-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="cancelPurchaseBtn" class="btn-cancel">Cancelar</button>
+        <button type="button" id="savePurchaseBtn" class="btn-refresh">Guardar Compra</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
