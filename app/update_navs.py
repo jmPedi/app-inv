@@ -1,6 +1,6 @@
-"""Flujo de ESCRITURA: actualiza la BBDD con las operaciones de los CSVs y los NAVs de Morningstar.
+"""Flujo de ESCRITURA: actualiza la BBDD con las operaciones de los CSVs y los NAVs de Financial Times.
 
-La web (app/portfolio.py) es de solo lectura; este módulo es quien habla con Morningstar
+La web (app/portfolio.py) es de solo lectura; este módulo es quien consulta Financial Times
 y escribe en SQLite. Se ejecuta al arrancar el contenedor y a las 18:00 (ver app/main.py),
 o a mano con: python -m app.update_navs
 """
@@ -19,8 +19,8 @@ from app.portfolio import (
     get_all_operaciones,
     get_stored_nav_map,
     save_nav_to_db,
-    fetch_nav_history_mstarpy,
-    SECURITY_CODES,
+    fetch_nav_history_ft,
+    FT_SYMBOLS,
     ACTIVE_ISINS,
     KNOWN_FUNDS,
 )
@@ -35,10 +35,25 @@ def sync_csv_operaciones(in_dir: str) -> int:
     Idempotente: la clave UNIQUE(fecha, isin, participaciones, importe) evita duplicados
     en cada re-sincronización. Devuelve el número de operaciones insertadas (0 si todas ya existían).
     """
-    csv_files = glob.glob(os.path.join(in_dir, '*.csv'))
-    if not csv_files:
+    csv_candidates = []
+    # Buscar en in_dir (*.csv, *.CSV) y subcarpetas
+    for ext in ('*.csv', '*.CSV', '*.tsv', '*.TSV'):
+        csv_candidates.extend(glob.glob(os.path.join(in_dir, ext)))
+        csv_candidates.extend(glob.glob(os.path.join(in_dir, '**', ext), recursive=True))
+
+    if not csv_candidates:
         parent = os.path.dirname(in_dir)
-        csv_files = glob.glob(os.path.join(parent, '*.csv'))
+        for ext in ('*.csv', '*.CSV'):
+            csv_candidates.extend(glob.glob(os.path.join(parent, ext)))
+
+    # Deduplicar rutas normalizadas
+    csv_files = sorted(list(set(os.path.abspath(p) for p in csv_candidates)))
+
+    if not csv_files:
+        print(f"[CSV Sync] No se encontraron archivos CSV en '{in_dir}' ni en su carpeta padre.")
+        return 0
+
+    print(f"[CSV Sync] Encontrados {len(csv_files)} archivo(s) CSV para procesar: {[os.path.basename(f) for f in csv_files]}")
 
     inserted = 0
     for path in csv_files:
@@ -46,8 +61,12 @@ def sync_csv_operaciones(in_dir: str) -> int:
             with open(path, 'r', encoding='utf-8-sig') as f:
                 content = f.read()
         except UnicodeDecodeError:
-            with open(path, 'r', encoding='latin-1') as f:
-                content = f.read()
+            try:
+                with open(path, 'r', encoding='latin-1') as f:
+                    content = f.read()
+            except Exception as e:
+                print(f"[CSV Sync] Error leyendo {path}: {e}")
+                continue
 
         delimiter = ';' if ';' in content else ','
         reader = csv.DictReader(content.splitlines(), delimiter=delimiter)
@@ -94,7 +113,7 @@ def sync_csv_operaciones(in_dir: str) -> int:
 
 
 def _guarda_navs_de_operaciones(isin: str, ops: List[Dict[str, Any]]) -> int:
-    """Guarda el precio de cada operación como NAV histórico (fuente para fondos sin Morningstar)."""
+    """Guarda el precio de cada operación como NAV histórico (fuente para fondos sin mercado público)."""
     n = 0
     for o in ops:
         if o['isin'] != isin:
@@ -105,31 +124,20 @@ def _guarda_navs_de_operaciones(isin: str, ops: List[Dict[str, Any]]) -> int:
     return n
 
 
-def _actualiza_navs_morningstar(isin: str, ops: List[Dict[str, Any]]) -> int:
-    """Descarga de Morningstar el histórico de NAVs del ISIN (bootstrap o delta) y lo guarda.
-
-    - Si la BBDD no tiene NAVs para el ISIN: descarga desde la primera operación (histórico completo).
-    - Si ya tiene: descarga solo desde la última fecha guardada + 1 (delta).
-    Devuelve el número de NAVs guardados.
-    """
-    code = SECURITY_CODES.get(isin)
-    if not code:
-        raise ValueError(f'No hay código de seguridad de Morningstar para {isin}')
-
+def _actualiza_navs_ft(isin: str, ops: List[Dict[str, Any]]) -> int:
+    """Descarga de Financial Times el histórico de NAVs del ISIN y lo guarda en SQLite."""
     existing = get_stored_nav_map(isin)
     today = datetime.date.today()
 
     if existing:
         last_date = max(datetime.datetime.strptime(d, '%Y-%m-%d').date() for d in existing)
-        first_date = last_date + datetime.timedelta(days=1)
+        days = max(30, (today - last_date).days + 10)
     else:
         fechas_ops = [datetime.datetime.strptime(o['fecha'], '%Y-%m-%d').date() for o in ops if o['isin'] == isin]
         first_date = min(fechas_ops) if fechas_ops else today - datetime.timedelta(days=400)
+        days = max(60, (today - first_date).days + 30)
 
-    if first_date > today:
-        return 0  # ya está al día
-
-    navs = fetch_nav_history_mstarpy(isin, first_date, today)
+    navs = fetch_nav_history_ft(isin, days=days)
     saved = 0
     for item in navs:
         save_nav_to_db(isin, item['date'], item['nav'])
@@ -152,14 +160,14 @@ def update_all_navs(in_dir: str = DEFAULT_IN_DIR) -> Dict[str, Any]:
     for isin in sorted(isins):
         resumen['fondos'][isin] = {'nombre': KNOWN_FUNDS.get(isin, {}).get('short_name', isin), 'n_ops': 0, 'n_navs': 0}
 
-        # 2a. NAVs históricos de las operaciones de este fondo
+        # 2a. NAVs históricos de las operaciones de este fondo (fallback base)
         resumen['fondos'][isin]['n_ops'] = _guarda_navs_de_operaciones(isin, ops)
 
-        # 2b. NAVs diarios desde Morningstar
+        # 2b. NAVs diarios desde Financial Times
         try:
-            n = _actualiza_navs_morningstar(isin, ops)
+            n = _actualiza_navs_ft(isin, ops)
             resumen['fondos'][isin]['n_navs'] = n
-            print(f"[{isin}] Morningstar: +{n} NAVs")
+            print(f"[{isin}] Financial Times: +{n} NAVs guardados en BBDD")
         except Exception as e:
             resumen['errores'].append(str(e))
             print(f"[{isin}] Aviso (se mantiene el histórico en BBDD): {e}")

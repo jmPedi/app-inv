@@ -113,90 +113,93 @@ def compra_existe_alta(isin: str, fecha: str, importe: float, participaciones: f
         ).fetchone()
         return row is not None
 
-# --- OBTENCIÓN DE NAVS DESDE MORNINGSTAR (API DIRECTA, SIN SELENIUM) ---
-# mstarpy v11 necesita Selenium/Chrome para resolver el ISIN, lo que no funciona
-# en el contenedor Docker (sin navegador). En su lugar se llama directamente al
-# endpoint de series con el código de seguridad de Morningstar pre-resuelto.
-SECURITY_CODES = {
-    'IE000ZYRH0Q7': 'F00001SELX',
-    'IE000QAZP7L2': 'F00001SELW',
-    'ES0146309002': 'F000010KY6',
-    # 'LU3256039929' (Silverway): no está indexado en Morningstar, se usa el fallback de SQLite
+# --- OBTENCIÓN DE NAVS DESDE FINANCIAL TIMES (API OFICIAL DIRECTA, SIN TOKENS/WAF) ---
+# Financial Times proporciona un endpoint oficial (chartapi/series) sin autenticación
+# que devuelve el histórico de NAVs en formato JSON para cualquier fondo europeo por su ID.
+FT_SYMBOLS = {
+    'IE000ZYRH0Q7': '1009295466',   # iShares Developed World Index (IE) S Acc EUR
+    'IE000QAZP7L2': '1009291676',   # iShares Emerging Markets Index Fund (IE) S Acc EUR
+    'ES0146309002': '117210347',    # Horos Value Internacional FI
+    'IE00BYX5MX67': '667898544',    # Fidelity S&P 500 Index Fund
+    'IE00BFZMJT78': '122531748',    # Neuberger Berman Short Duration Euro Bond
+    # 'LU3256039929' (Silverway): no cotiza en mercados públicos, se usa el NAV de las operaciones
 }
 
-_token_cache: Dict[str, Any] = {}
+def _resolve_ft_symbol(isin: str) -> str:
+    """Obtiene el ID numérico de Financial Times para un ISIN (desde dict o por scraping)."""
+    if isin in FT_SYMBOLS:
+        return FT_SYMBOLS[isin]
+    # Autodescubrimiento para ISINs nuevos
+    try:
+        url = f'https://markets.ft.com/data/funds/tearsheet/historical?s={isin}:EUR'
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        m = re.search(r'data-module-name=\"HistoricalPricesApp\"[^>]*data-mod-config=\"([^\"]+)\"', resp.text)
+        if not m:
+            m = re.search(r'data-mod-config=\"([^\"]+)\"[^>]*data-module-name=\"HistoricalPricesApp\"', resp.text)
+        if m:
+            import json as _json
+            cfg = _json.loads(m.group(1).replace('&quot;', '"'))
+            sym = cfg.get('symbol')
+            if sym:
+                FT_SYMBOLS[isin] = sym
+                return sym
+    except Exception:
+        pass
+    raise ValueError(f'No hay símbolo de Financial Times para {isin}')
 
-def _get_mstar_token() -> str:
-    """Obtiene el Bearer token de Morningstar scrapeándolo de su página de chart (cacheado 1h).
+def fetch_nav_history_ft(isin: str, start_date: datetime.date = None, end_date: datetime.date = None, days: int = 400) -> List[Dict[str, Any]]:
+    """Devuelve la lista de NAVs diarios {date, nav} desde la API oficial de Financial Times."""
+    sym = _resolve_ft_symbol(isin)
+    if not sym:
+        raise ValueError(f'No hay símbolo de Financial Times para {isin}')
 
-    Morningstar a veces responde con un challenge WAF (status 202). En ese caso se devuelve
-    el token, si lo hay, o se lanza; el llamador usa el histórico de SQLite como respaldo.
-    """
-    now = datetime.datetime.now()
-    cached = _token_cache.get('token')
-    cached_time = _token_cache.get('time')
-    if cached and cached_time and (now - cached_time).total_seconds() < 3600:
-        return cached
+    if start_date and end_date:
+        calc_days = (end_date - start_date).days + 15
+        num_days = max(30, min(calc_days, 1000))
+    else:
+        num_days = max(30, days)
 
-    url = 'https://www.morningstar.com/funds/xnas/afozx/chart'
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'}
-    last_error = None
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=headers, timeout=20)
-            m = re.search(r'token:"([A-Za-z0-9\-_\.]+)"', resp.text)
-            if m:
-                _token_cache['token'] = m.group(1)
-                _token_cache['time'] = now
-                return m.group(1)
-            last_error = f'No token en respuesta (status={resp.status_code})'
-        except Exception as e:
-            last_error = str(e)
-        if attempt < 2:
-            time.sleep(2 * (attempt + 1))
-    _token_cache['challenge_until'] = now + datetime.timedelta(minutes=10)
-    raise RuntimeError(f'No se pudo obtener el token de Morningstar: {last_error}')
-
-def fetch_nav_history_mstarpy(isin: str, start_date: datetime.date, end_date: datetime.date) -> List[Dict[str, Any]]:
-    """Devuelve la lista de NAVs diarios {date, nav} del endpoint público de Morningstar.
-
-    Lanza ValueError si el ISIN no tiene código de seguridad asignado (p.ej. Silverway),
-    el llamador lo captura y usa el histórico almacenado en SQLite.
-    """
-    code = SECURITY_CODES.get(isin)
-    if not code:
-        raise ValueError(f'No hay código de seguridad de Morningstar para {isin}')
-
-    url = 'https://www.us-api.morningstar.com/QS-markets/chartservice/v2/timeseries'
-    params = {
-        'query': f'{code}:nav',
-        'frequency': 'd',
-        'startDate': start_date.strftime('%Y-%m-%d'),
-        'endDate': end_date.strftime('%Y-%m-%d'),
-        'trackMarketData': '3.6.3',
-        'instid': 'DOTCOM',
+    url = 'https://markets.ft.com/data/chartapi/series'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
     }
-
-    for attempt in range(2):
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36',
-            'Authorization': f"Bearer {_get_mstar_token()}",
-            'Accept': 'application/json',
-        }
-        resp = requests.get(url, params=params, headers=headers, timeout=20)
-        if resp.status_code in (401, 403) and attempt == 0:
-            _token_cache.clear()
-            continue
-        resp.raise_for_status()
-        break
-
+    body = {
+        'days': num_days,
+        'dataNormalized': False,
+        'dataPeriod': 'Day',
+        'dataInterval': 1,
+        'realtime': False,
+        'yFormat': '0.###',
+        'timeServiceFormat': 'JSON',
+        'returnDateType': 'ISO8601',
+        'elements': [{'Symbol': sym, 'Type': 'price', 'OverlayIndicators': []}]
+    }
+    resp = requests.post(url, json=body, headers=headers, timeout=20)
+    resp.raise_for_status()
     data = resp.json()
-    rows = data[0]['series'] if data and isinstance(data, list) else []
-    return [
-        {'date': row['date'], 'nav': float(row['nav'])}
-        for row in rows
-        if row.get('nav') is not None
-    ]
+
+    dates = data.get('Dates', [])
+    close_vals = []
+    for el in data.get('Elements', []):
+        for cs in el.get('ComponentSeries', []):
+            if cs.get('Type') == 'Close':
+                close_vals = cs.get('Values', [])
+                break
+
+    result = []
+    for d_str, nav_val in zip(dates, close_vals):
+        if nav_val is not None and nav_val > 0:
+            clean_date = d_str.split('T')[0]
+            if start_date and end_date:
+                dt = datetime.datetime.strptime(clean_date, '%Y-%m-%d').date()
+                if not (start_date <= dt <= end_date):
+                    continue
+            result.append({'date': clean_date, 'nav': round(float(nav_val), 5)})
+
+    return result
 
 # --- FONDOS Y METADATOS ---
 KNOWN_FUNDS = {
