@@ -325,6 +325,18 @@ body {
   justify-content: center;
 }
 
+/* En la fila de 2 columnas, los paneles comparten altura; el donut crece para
+   ocupar el hueco y no quedar pequeño ni con espacio muerto debajo */
+.grid-2col > .panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.grid-2col > .panel > .chart-container-doughnut {
+  flex: 1 1 auto;
+  min-height: 230px;
+}
+
 /* Tables */
 .table-responsive {
   overflow-x: auto;
@@ -355,6 +367,12 @@ body {
 .table td, .table-compact td {
   padding: 12px 12px;
   border-bottom: 1px solid #1a2844;
+}
+
+/* En tablas compactas los encabezados pueden partir en 2 líneas para evitar
+   que columnas anchas (p. ej. "Mi Rentabilidad Real") desborden en móvil */
+.table-compact th {
+  white-space: normal;
 }
 
 .fund-title {
@@ -580,7 +598,9 @@ code {
   .table td, .table-compact td { padding: 10px 10px; font-size: 0.8rem; }
   /* Las tablas anchas mantienen scroll horizontal limpio en móvil */
   .table-responsive { -webkit-overflow-scrolling: touch; }
-  .table-responsive > table { min-width: 720px; }
+  /* Solo las tablas anchas (Posiciones Activas y Operaciones) fuerzan scroll;
+     las compactas como Variaciones usan su ancho natural */
+  .table-responsive > .table { min-width: 720px; }
   .chart-container-large { height: 200px; }
   .chart-container-doughnut { height: 190px; }
   .chart-top-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
