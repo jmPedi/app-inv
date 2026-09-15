@@ -17,6 +17,13 @@ from app.portfolio import (
     KNOWN_FUNDS,
 )
 from app.update_navs import update_all_navs
+from app.cripto import (
+    get_cripto_portfolio_summary,
+    insert_cripto_operacion,
+    cripto_compra_existe_alta,
+    CRYPTO_COINS,
+)
+from app.update_cripto import update_all_cripto
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IN_DIR = os.path.join(BASE_DIR, "IN")
@@ -28,11 +35,12 @@ _update_lock = threading.Lock()
 
 
 def _run_update():
-    """Ejecuta la actualización de NAVs protegiendo contra llamadas simultáneas."""
+    """Ejecuta la actualización de NAVs y precios de cripto protegiendo contra llamadas simultáneas."""
     if not _update_lock.acquire(blocking=False):
         return
     try:
         update_all_navs(IN_DIR)
+        update_all_cripto(IN_DIR)
     except Exception as e:
         print(f"Error en la actualización de NAVs: {e}")
     finally:
@@ -126,6 +134,66 @@ def api_create_operacion(op: OperacionCreate):
         'precio_titulo': op.precio_titulo or round(op.importe / op.participaciones, 4),
         'tipo': 'Compra',
         'operador': op.operador or KNOWN_FUNDS.get(op.isin, {}).get('operador', ''),
+        'fuente': 'manual',
+    }
+
+
+# --- ENDPOINTS CRIPTOACTIVOS ---
+
+class CriptoOperacionCreate(BaseModel):
+    symbol: str            # 'bitcoin' | 'ethereum'
+    fecha: str             # YYYY-MM-DD
+    importe: float
+    cantidad: float
+    precio_unitario: float | None = None
+    operador: str | None = None
+
+
+@app.get("/api/criptoactivos")
+def api_get_criptoactivos():
+    try:
+        return get_cripto_portfolio_summary()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/criptoactivos")
+def api_create_cripto_operacion(op: CriptoOperacionCreate):
+    symbol = op.symbol.strip().lower()
+    if symbol not in CRYPTO_COINS:
+        raise HTTPException(status_code=422, detail=f"Símbolo no soportado: {symbol}")
+    if cripto_compra_existe_alta(symbol, op.fecha, op.importe, op.cantidad):
+        raise HTTPException(
+            status_code=409,
+            detail=f"La compra de {CRYPTO_COINS[symbol]['symbol']} del {op.fecha} ya está registrada."
+        )
+    try:
+        new_id = insert_cripto_operacion(
+            symbol=symbol,
+            fecha=op.fecha,
+            importe=op.importe,
+            cantidad=op.cantidad,
+            precio_unitario=op.precio_unitario or 0,
+            operador=op.operador or CRYPTO_COINS.get(symbol, {}).get('operador_default', ''),
+            fuente='manual',
+            tipo='Compra',
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if not new_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"La compra de {CRYPTO_COINS[symbol]['symbol']} del {op.fecha} ya está registrada."
+        )
+    return {
+        'id': new_id,
+        'symbol': symbol,
+        'fecha': op.fecha,
+        'importe': op.importe,
+        'cantidad': op.cantidad,
+        'precio_unitario': op.precio_unitario or round(op.importe / op.cantidad, 4),
+        'tipo': 'Compra',
+        'operador': op.operador or CRYPTO_COINS.get(symbol, {}).get('operador_default', ''),
         'fuente': 'manual',
     }
 

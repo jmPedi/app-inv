@@ -1,0 +1,63 @@
+/* =========================================================
+   ESTILOS CRIPTOACTIVOS (frontend/cripto.css)
+   Cargado después de style.css. Solo añade estilos propios
+   de la sección de cripto; la hoja de fondos no se toca.
+   ========================================================= */
+
+/* --- Barra de navegación por pestañas --- */
+.nav-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 8px;
+}
+
+.nav-tab {
+  background: #0b1120;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  padding: 9px 18px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+.nav-tab:hover {
+  color: #fff;
+  border-color: #38bdf8;
+}
+
+.nav-tab.active {
+  background: #1e3a5f;
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+
+/* --- Acciones de la sección (botón + pista CSV) --- */
+.section-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.section-actions .muted {
+  font-size: 0.82rem;
+  max-width: 720px;
+}
+
+.section-actions code {
+  background: #0b1120;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
+  color: var(--accent);
+}

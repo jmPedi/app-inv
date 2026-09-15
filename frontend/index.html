@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mi Cartera de Inversión</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/cripto.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -23,6 +24,15 @@
         </button>
       </div>
     </header>
+
+    <!-- Navegación por pestañas -->
+    <nav class="nav-tabs" aria-label="Secciones" id="mainNav">
+      <button class="nav-tab active" id="tabFondos" type="button" onclick="switchTab('fondos')">📁 Fondos</button>
+      <button class="nav-tab" id="tabCripto" type="button" onclick="switchTab('cripto')">🪙 Criptoactivos</button>
+    </nav>
+
+    <!-- ===================== SECCIÓN FONDOS ===================== -->
+    <div id="fondosSection">
 
     <!-- KPI Summary Cards -->
     <div class="kpi-grid">
@@ -254,6 +264,133 @@
       </div>
     </div>
 
+    </div><!-- /fondosSection -->
+
+    <!-- ===================== SECCIÓN CRIPTOACTIVOS ===================== -->
+    <div id="criptoSection" class="hidden">
+      <div class="section-actions">
+        <button id="cryptoNewPurchaseBtn" class="btn-refresh" type="button">+ Nueva Compra Cripto</button>
+        <p class="muted">💡 También puedes importar CSVs de Bitvavo / bit2me en la carpeta <code>IN/crypto</code> y ejecutar <code>python -m app.update_cripto</code> para sincronizarlos. Los precios de BTC/ETH se actualizan automáticamente a las 18:00.</p>
+      </div>
+
+      <!-- KPI Crypto -->
+      <div class="kpi-grid">
+        <div class="kpi-card highlight">
+          <span class="kpi-label">Valor de Mercado Cripto</span>
+          <div class="kpi-value" id="cryptoKpiMarketVal">-- €</div>
+          <div class="kpi-sub" id="cryptoKpiGain">-- € (--%)</div>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Capital Invertido Cripto</span>
+          <div class="kpi-value" id="cryptoKpiInvested">-- €</div>
+          <div class="kpi-sub muted">Aportaciones netas</div>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Rentabilidad Cripto</span>
+          <div class="kpi-value" id="cryptoKpiGainPct">--%</div>
+          <div class="kpi-sub" id="cryptoKpiGainAbs">-- € de beneficio</div>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Criptos en Cartera</span>
+          <div class="kpi-value" id="cryptoKpiCount">0</div>
+          <div class="kpi-sub muted" id="cryptoKpiLastUpdated">Actualizado: --</div>
+        </div>
+      </div>
+
+      <!-- Gráfico temporal cripto -->
+      <div class="panel chart-panel-full">
+        <div class="chart-top-bar">
+          <div class="chart-view-selector" id="cryptoViewButtons">
+            <button class="view-tab active" onclick="switchCryptoChartView('TOTAL', this)">📊 Total Cripto</button>
+            <button class="view-tab" onclick="switchCryptoChartView('bitcoin', this)">🟠 BTC</button>
+            <button class="view-tab" onclick="switchCryptoChartView('ethereum', this)">🔵 ETH</button>
+          </div>
+          <div class="timeframe-selector">
+            <button class="tf-btn" onclick="setCryptoTimeframe('1D', this)">1D</button>
+            <button class="tf-btn" onclick="setCryptoTimeframe('5D', this)">5D</button>
+            <button class="tf-btn" onclick="setCryptoTimeframe('1M', this)">1M</button>
+            <button class="tf-btn" onclick="setCryptoTimeframe('6M', this)">6M</button>
+            <button class="tf-btn" onclick="setCryptoTimeframe('YTD', this)">YTD</button>
+            <button class="tf-btn" onclick="setCryptoTimeframe('1Y', this)">1Y</button>
+            <button class="tf-btn active" onclick="setCryptoTimeframe('ALL', this)">All</button>
+          </div>
+        </div>
+        <div class="chart-sub-metric" id="cryptoChartMetric">
+          <span>Evolución: <strong>--</strong></span>
+        </div>
+        <div class="chart-container-large">
+          <canvas id="criptoChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Donut + Posiciones -->
+      <div class="grid-2col">
+        <div class="panel">
+          <h3>
+            Distribución Cripto
+            <span class="info-icon" data-tooltip="Porcentaje del valor de tus criptoactivos asignado a cada moneda.">ℹ</span>
+          </h3>
+          <div class="chart-container-doughnut">
+            <canvas id="criptoAllocationChart"></canvas>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Posiciones Cripto</h3>
+          <div class="table-responsive">
+            <table class="table-compact">
+              <thead>
+                <tr>
+                  <th>Cripto</th>
+                  <th>Exchange</th>
+                  <th>Cantidad</th>
+                  <th>Precio Actual</th>
+                  <th>Valor Mercado</th>
+                  <th>Beneficio (€)</th>
+                  <th>Rentabilidad (%)</th>
+                  <th>Peso</th>
+                </tr>
+              </thead>
+              <tbody id="criptoTableBody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Historial de Operaciones Cripto -->
+      <div class="panel">
+        <div class="panel-header-accordion" onclick="toggleSection('criptoOperationsContent', 'criptoOpAccordionIcon')">
+          <h3>
+            Historial de Operaciones Cripto
+            <span class="info-icon" data-tooltip="Registro cronológico de cada compra de criptoactivos con fecha, cantidad y precio.">ℹ</span>
+          </h3>
+          <span id="criptoOpAccordionIcon">▼</span>
+        </div>
+        <div id="criptoOperationsContent">
+          <p class="muted" style="margin-bottom: 12px;">Detalle de todas las compras registradas:</p>
+          <div class="table-responsive">
+            <table class="table table-compact">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Tipo</th>
+                  <th>Cripto</th>
+                  <th>Exchange</th>
+                  <th>Importe</th>
+                  <th>Cantidad</th>
+                  <th>Precio Unitario</th>
+                </tr>
+              </thead>
+              <tbody id="criptoOperationsTableBody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div><!-- /criptoSection -->
+
     <footer class="footer">
       <span>Carpeta de sincronización: <code>c:\Users\JmPed\trabajo\inversion\IN</code></span>
     </footer>
@@ -303,6 +440,50 @@
     </div>
   </div>
 
+  <!-- Modal Alta de Compra Cripto -->
+  <div id="criptoPurchaseOverlay" class="modal-overlay hidden">
+    <div id="criptoPurchaseModal" class="modal-box" role="dialog" aria-modal="true" aria-labelledby="criptoPurchaseTitle">
+      <h3 id="criptoPurchaseTitle">Registrar Compra de Cripto</h3>
+      <div>
+        <label for="criptoPurchaseActivo">Criptoactivo</label>
+        <input type="text" id="criptoPurchaseActivo" list="criptoSuggestions" autocomplete="off" placeholder="BTC / ETH" />
+        <datalist id="criptoSuggestions">
+          <option value="BTC">Bitcoin</option>
+          <option value="ETH">Ethereum</option>
+        </datalist>
+      </div>
+      <div class="form-grid">
+        <div>
+          <label for="criptoPurchaseFecha">Fecha</label>
+          <input type="date" id="criptoPurchaseFecha" />
+        </div>
+        <div>
+          <label for="criptoPurchaseCantidad">Cantidad</label>
+          <input type="number" step="0.00000001" id="criptoPurchaseCantidad" />
+        </div>
+        <div>
+          <label for="criptoPurchasePrecio">Precio Unitario (€)</label>
+          <input type="number" step="0.0001" id="criptoPurchasePrecio" />
+        </div>
+        <div>
+          <label for="criptoPurchaseExchange">Exchange</label>
+          <input type="text" id="criptoPurchaseExchange" list="exchangeSuggestions" placeholder="Bitvavo / bit2me" />
+          <datalist id="exchangeSuggestions">
+            <option value="Bitvavo"></option>
+            <option value="bit2me"></option>
+          </datalist>
+        </div>
+      </div>
+      <p class="muted" style="margin: 8px 0;">El importe se calcula automáticamente: Cantidad × Precio Unitario.</p>
+      <div id="criptoPurchaseMsg" class="msg-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="cancelCriptoPurchaseBtn" class="btn-cancel">Cancelar</button>
+        <button type="button" id="saveCriptoPurchaseBtn" class="btn-refresh">Guardar Compra</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
+  <script src="/static/cripto.js"></script>
 </body>
 </html>
