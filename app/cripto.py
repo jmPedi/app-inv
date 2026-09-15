@@ -32,7 +32,7 @@ CRYPTO_COINS = {
     },
 }
 
-# Mapeo de símbolos legibles → ids CoinGecko (para datalist/modal)
+# Mapeo de símbolos legibles → ids de CRYPTO_COINS (para datalist/modal)
 SYMBOL_TO_CG = {v['symbol']: k for k, v in CRYPTO_COINS.items()}
 
 
@@ -124,7 +124,7 @@ def get_all_cripto_operaciones() -> List[Dict[str, Any]]:
 
 # --- PRECIOS ---
 def get_cripto_precio_map(symbol: str) -> Dict[str, float]:
-    """Devuelve {fecha: precio_eur} para un symbol (CoinGecko id)."""
+    """Devuelve {fecha: precio_eur} para un symbol (id de CRYPTO_COINS)."""
     init_cripto_db()
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(

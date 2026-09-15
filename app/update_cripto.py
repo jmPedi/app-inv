@@ -152,7 +152,7 @@ def _actualiza_precios_cripto(n_dias: int = 400) -> int:
 
 
 def update_all_cripto(in_dir: str = DEFAULT_IN_DIR) -> Dict[str, Any]:
-    """Sincroniza CSVs de cripto y actualiza los precios desde CoinGecko."""
+    """Sincroniza CSVs de cripto y actualiza los precios desde Binance."""
     init_cripto_db()
     resumen: Dict[str, Any] = {'operaciones_csv': 0, 'precios': 0, 'errores': []}
 
