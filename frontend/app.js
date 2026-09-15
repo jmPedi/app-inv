@@ -110,7 +110,7 @@ async function loadData(forceRefresh = false) {
         <td><strong>${f.participaciones}</strong></td>
         <td>${formatEur(f.invertido)}</td>
         <td>${f.nav_actual.toFixed(2)} €</td>
-        <td style="font-size: 0.85rem; color: var(--text-muted);">${f.fecha_nav.includes('-') ? f.fecha_nav.split('-').reverse().join('/') : f.fecha_nav}</td>
+        <td>${f.fecha_nav.includes('-') ? f.fecha_nav.split('-').reverse().join('/') : f.fecha_nav}</td>
         <td><strong>${formatEur(f.valor_actual)}</strong></td>
         <td class="${f.beneficio_eur >= 0 ? 'positive' : 'negative'}"><strong>${f.beneficio_eur > 0 ? '+' : ''}${formatEur(f.beneficio_eur)}</strong></td>
         <td>${renderBadge(f.beneficio_pct)}</td>

@@ -130,12 +130,17 @@ def _actualiza_navs_ft(isin: str, ops: List[Dict[str, Any]]) -> int:
     today = datetime.date.today()
 
     if existing:
-        last_date = max(datetime.datetime.strptime(d, '%Y-%m-%d').date() for d in existing)
+        dates = [datetime.datetime.strptime(d, '%Y-%m-%d').date() for d in existing]
+        last_date = max(dates)
+        first_date = min(dates)
         days = max(30, (today - last_date).days + 10)
+        # Si el historico no llega ~13 meses atras, ampliar la descarga para calcular la rentabilidad a 1 anio (columna Anio)
+        if (today - first_date).days < 400:
+            days = max(days, 400)
     else:
         fechas_ops = [datetime.datetime.strptime(o['fecha'], '%Y-%m-%d').date() for o in ops if o['isin'] == isin]
         first_date = min(fechas_ops) if fechas_ops else today - datetime.timedelta(days=400)
-        days = max(60, (today - first_date).days + 30)
+        days = max(400, (today - first_date).days + 30)
 
     navs = fetch_nav_history_ft(isin, days=days)
     saved = 0
