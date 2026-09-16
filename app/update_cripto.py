@@ -8,6 +8,7 @@ import os
 import glob
 import csv
 import datetime
+import re
 import requests
 from typing import Dict, Any
 
@@ -34,14 +35,155 @@ BINANCE_KLINES_URL = (
 )
 
 
-def sync_csv_cripto_operaciones(in_dir: str) -> int:
-    """Lee los CSVs de 'IN/crypto/' y sincroniza sus órdenes en cripto_operaciones.
+# Símbolos cripto soportados: 'BTC' -> 'bitcoin', 'ETH' -> 'ethereum'.
+_CRIPTO_SOPORTADA = {cfg['symbol'].upper(): coin_id for coin_id, cfg in CRYPTO_COINS.items()}
 
-    Solo procesa la subcarpeta 'crypto' para no mezclar con los CSVs de fondos.
-    Idempotente: la clave UNIQUE(fecha, symbol, cantidad, importe) evita duplicados.
-    Devuelve el número de operaciones insertadas.
+
+def _indice_cabecera(lineas: list, delimiter: str) -> int:
+    """Índice de la primera línea que parece una cabecera real.
+
+    Salta las líneas en blanco y las filas 'Unnamed: N' que crea pandas al exportar
+    desde Excel (los summary de Bit2Me traen la cabecera real en la fila 2).
     """
-    crypto_dir = os.path.join(in_dir, 'crypto')
+    for i, linea in enumerate(lineas):
+        if not linea.strip():
+            continue
+        celdas = [c.strip() for c in linea.split(delimiter)]
+        if celdas and all(c == '' or c.startswith('Unnamed:') for c in celdas):
+            continue
+        return i
+    return 0
+
+
+def _formato_archivo(cabecera: str) -> str:
+    """Detecta el formato del CSV por las palabras clave de la cabecera real:
+    'bit2me' (summary con 'Tipo de operación'), 'bitvavo' (historial completo) o
+    'generico' (CSV propio con columnas symbol, fecha, cantidad...)."""
+    cab = cabecera.lower()
+    if 'tipo de operación' in cab or 'tipo de operacion' in cab:
+        return 'bit2me'
+    if 'received / paid amount' in cab or ('timezone' in cab and 'currency' in cab):
+        return 'bitvavo'
+    return 'generico'
+
+
+def _busca_fecha(fila: list):
+    """Devuelve la primera celda con aspecto de fecha (YYYY-MM-DD[ HH:MM[:SS]])."""
+    for celda in fila:
+        if celda and re.search(r'\d{4}-\d{2}-\d{2}', celda):
+            return celda
+    return None
+
+
+def _fila_compra_bit2me(fila: list):
+    """Lee una fila del summary de Bit2Me y devuelve la compra si la hay (o None).
+
+    Solo interesan los trades en que se adquiere cripto soportada (BTC/ETH) pagando
+    en EUR. Columnas del summary: 0 Tipo de operación, 1 Cantidad de destino,
+    2 Moneda de destino, 3 Cantidad de origen, 4 Moneda de origen, 7 Exchange y una
+    columna final con la fecha. Los depósitos, staking y retiradas se ignoran.
+    """
+    if len(fila) < 5:
+        return None
+    tipo = fila[0].lower()
+    if tipo not in ('trade', 'compra', 'buy'):
+        return None
+    mon_dest = fila[2].upper()
+    mon_origen = fila[4].upper()
+    if mon_origen != 'EUR' or mon_dest not in _CRIPTO_SOPORTADA:
+        return None
+    cantidad = parse_float(fila[1])
+    importe = parse_float(fila[3])
+    if cantidad <= 0 or importe <= 0:
+        return None
+    operador = 'bit2me'
+    if len(fila) > 7 and fila[7]:
+        operador = fila[7]  # p. ej. 'Bit2Me'
+    return {
+        'symbol': _CRIPTO_SOPORTADA[mon_dest],
+        'cantidad': cantidad,
+        'importe': importe,
+        'precio': importe / cantidad,
+        'fecha': _busca_fecha(fila),
+        'operador': operador,
+        'tipo': 'Compra',
+    }
+
+
+def _fila_compra_bitvavo(fila: list):
+    """Lee una fila del historial completo de Bitvavo y devuelve la compra si la hay (o None).
+
+    Solo se importan las filas Type='buy' de cripto soportada. Columnas:
+    1 Fecha, 2 Hora, 3 Type, 4 Currency, 5 Amount, 7 Quote Price y 9 Received / Paid
+    Amount (EUR desembolsados, negativo). El resto de tipos (withdrawal, staking,
+    deposit, sell...) no son compras y se ignoran.
+    """
+    if len(fila) < 10:
+        return None
+    if fila[3].strip().lower() != 'buy':
+        return None
+    moneda = fila[4].strip().upper()
+    if moneda not in _CRIPTO_SOPORTADA:
+        return None
+    cantidad = abs(parse_float(fila[5]))
+    precio = parse_float(fila[7])
+    importe = abs(parse_float(fila[9]))
+    if cantidad <= 0:
+        return None
+    if precio <= 0 and importe > 0:
+        precio = importe / cantidad
+    return {
+        'symbol': _CRIPTO_SOPORTADA[moneda],
+        'cantidad': cantidad,
+        'importe': importe if importe > 0 else cantidad * precio,
+        'precio': precio,
+        'fecha': _busca_fecha(fila),
+        'operador': 'Bitvavo',
+        'tipo': 'Compra',
+    }
+
+
+def _guarda_compra(op: dict) -> int:
+    """Valida y registra una compra en cripto_operaciones. Devuelve 1 si inserta."""
+    if op.get('symbol') not in CRYPTO_COINS or op.get('cantidad') is None:
+        return 0
+    dt = parse_date(op.get('fecha')) if op.get('fecha') else None
+    if dt is None or dt.year < 2020:
+        return 0
+    cantidad = op['cantidad']
+    importe = op.get('importe', 0) or 0
+    precio = op.get('precio', 0) or 0
+    # Si solo viene cantidad+precio, derivar importe; si solo cantidad+importe, derivar precio
+    if importe <= 0 and precio > 0:
+        importe = cantidad * precio
+    if precio <= 0 and importe > 0:
+        precio = importe / cantidad
+    if importe <= 0 or precio <= 0 or cantidad <= 0:
+        return 0
+    new_id = insert_cripto_operacion(
+        symbol=op['symbol'],
+        fecha=dt.strftime('%Y-%m-%d'),
+        importe=importe,
+        cantidad=cantidad,
+        precio_unitario=precio,
+        operador=op.get('operador') or CRYPTO_COINS.get(op['symbol'], {}).get('operador_default', ''),
+        fuente='csv',
+        tipo=op.get('tipo') or 'Compra',
+    )
+    return 1 if new_id else 0
+
+
+def sync_csv_cripto_operaciones(in_dir: str) -> int:
+    """Lee los CSVs de 'IN/cripto/' y sincroniza sus compras en cripto_operaciones.
+
+    Solo procesa la subcarpeta 'cripto' para no mezclar con los CSVs de fondos.
+    Reconocidos los formatos Bit2Me (summary con 'Tipo de operación') y Bitvavo
+    (historial completo) y uno genérico por encabezados. Se ignoran los movimientos
+    que no son compras de cripto soportada pagadas en EUR (depósitos, staking,
+    retiradas...). Idempotente: la clave UNIQUE(fecha, symbol, cantidad, importe)
+    evita duplicados. Devuelve el número de operaciones insertadas.
+    """
+    crypto_dir = os.path.join(in_dir, 'cripto')
     csv_candidates = []
     for ext in ('*.csv', '*.CSV', '*.tsv', '*.TSV'):
         csv_candidates.extend(glob.glob(os.path.join(crypto_dir, ext)))
@@ -50,7 +192,7 @@ def sync_csv_cripto_operaciones(in_dir: str) -> int:
     csv_files = sorted(list(set(os.path.abspath(p) for p in csv_candidates)))
 
     if not csv_files:
-        print(f"[CSV Crypto] No se encontraron CSVs en '{crypto_dir}'. Crea la carpeta IN/crypto y añade tus exportaciones.")
+        print(f"[CSV Crypto] No se encontraron CSVs en '{crypto_dir}'. Crea la carpeta IN/cripto y añade tus exportaciones.")
         return 0
 
     print(f"[CSV Crypto] Encontrados {len(csv_files)} archivo(s): {[os.path.basename(f) for f in csv_files]}")
@@ -68,57 +210,48 @@ def sync_csv_cripto_operaciones(in_dir: str) -> int:
                 print(f"[CSV Crypto] Error leyendo {path}: {e}")
                 continue
 
+        lineas = content.splitlines()
+        if not lineas:
+            continue
         delimiter = ';' if ';' in content else ','
-        reader = csv.DictReader(content.splitlines(), delimiter=delimiter)
+        # Cabecera real (saltando las filas 'Unnamed' de pandas) y formato del fichero
+        idx_cab = _indice_cabecera(lineas, delimiter)
+        formato = _formato_archivo(lineas[idx_cab])
+        if formato == 'generico':
+            filas = csv.DictReader(lineas[idx_cab:], delimiter=delimiter)
+        else:
+            filas = csv.reader(lineas[idx_cab + 1:], delimiter=delimiter)
 
-        for row in reader:
-            # Detectar symbol: puede venir como 'symbol', 'divisa', 'moneda', 'activo' o 'BTC'/'ETH'
-            symbol = get_row_value(row, ['symbol', 'divisa', 'moneda', 'activo', 'asset', 'crypto', 'coin'])
-            if not symbol:
-                continue
-            symbol = symbol.strip().lower()
-            # Acepta 'BTC'/'ETH' o 'bitcoin'/'ethereum'
-            if symbol in ('btc', 'bitcoin'):
-                symbol = 'bitcoin'
-            elif symbol in ('eth', 'ethereum'):
-                symbol = 'ethereum'
-            elif symbol not in CRYPTO_COINS:
-                print(f"[CSV Crypto] Símbolo no configurado, se ignora: {symbol}")
-                continue
+        for fila in filas:
+            op = None
+            if formato == 'generico':
+                # Detectar symbol: puede venir como 'symbol', 'divisa', 'moneda', 'activo' o 'BTC'/'ETH'
+                symbol = get_row_value(fila, ['symbol', 'divisa', 'moneda', 'activo', 'asset', 'crypto', 'coin'])
+                if not symbol:
+                    continue
+                symbol = symbol.strip().lower()
+                if symbol in ('btc', 'bitcoin'):
+                    symbol = 'bitcoin'
+                elif symbol in ('eth', 'ethereum'):
+                    symbol = 'ethereum'
+                elif symbol not in CRYPTO_COINS:
+                    print(f"[CSV Crypto] Símbolo no configurado, se ignora: {symbol}")
+                    continue
+                op = {
+                    'symbol': symbol,
+                    'cantidad': parse_float(get_row_value(fila, ['cantidad', 'qty', 'quantity', 'amount', 'aantal', 'cantidad de la moneda'])),
+                    'importe': parse_float(get_row_value(fila, ['importe', 'cost', 'coste', 'monto', 'monto total', 'total'])),
+                    'precio': parse_float(get_row_value(fila, ['precio', 'price', 'precio unitario', 'prijs'])),
+                    'fecha': get_row_value(fila, ['fecha de la orden', 'fecha de operación', 'fecha', 'date']),
+                    'operador': get_row_value(fila, ['exchange', 'plataforma', 'operador', 'broker']),
+                    'tipo': get_row_value(fila, ['tipo operación', 'tipo']) or 'Compra',
+                }
+            elif formato == 'bit2me':
+                op = _fila_compra_bit2me(fila)
+            else:
+                op = _fila_compra_bitvavo(fila)
 
-            fecha = get_row_value(row, ['fecha de la orden', 'fecha de operación', 'fecha', 'date'])
-            cantidad = parse_float(get_row_value(row, ['cantidad', 'qty', 'quantity', 'amount', 'aantal', 'cantidad de la moneda']))
-            importe = parse_float(get_row_value(row, ['importe', 'cost', 'coste', 'monto', 'monto total', 'total']))
-            precio = parse_float(get_row_value(row, ['precio', 'price', 'precio unitario', 'prijs']))
-
-            if cantidad <= 0 and importe <= 0:
-                continue
-
-            dt = parse_date(fecha)
-            if dt.year < 2020:
-                continue
-
-            # Si solo viene cantidad+precio, derivar importe; si solo cantidad+importe, derivar precio
-            if importe <= 0 and precio > 0 and cantidad > 0:
-                importe = cantidad * precio
-            if precio <= 0 and importe > 0 and cantidad > 0:
-                precio = importe / cantidad
-
-            operador = (get_row_value(row, ['exchange', 'plataforma', 'operador', 'broker'])
-                        or CRYPTO_COINS.get(symbol, {}).get('operador_default', ''))
-            tipo = get_row_value(row, ['tipo operación', 'tipo']) or 'Compra'
-
-            new_id = insert_cripto_operacion(
-                symbol=symbol,
-                fecha=dt.strftime('%Y-%m-%d'),
-                importe=importe,
-                cantidad=cantidad,
-                precio_unitario=precio,
-                operador=operador,
-                fuente='csv',
-                tipo=tipo,
-            )
-            if new_id:
+            if op and _guarda_compra(op):
                 inserted += 1
 
     return inserted
