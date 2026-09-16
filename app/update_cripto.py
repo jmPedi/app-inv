@@ -75,6 +75,17 @@ def _busca_fecha(fila: list):
     return None
 
 
+def _parse_decimal(v):
+    """Convierte un valor CSV a float aceptando coma decimal europea ('100,98' → 100.98)."""
+    if v is None:
+        return 0.0
+    s = str(v).strip().replace('"', '').replace(',', '.').strip()
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _fila_compra_bit2me(fila: list):
     """Lee una fila del summary de Bit2Me y devuelve la compra si la hay (o None).
 
@@ -230,21 +241,34 @@ def sync_csv_cripto_operaciones(in_dir: str) -> int:
                 if not symbol:
                     continue
                 symbol = symbol.strip().lower()
+                # Normalizar etiquetas tipo 'Bitcoin(BTC)' / 'Ethereum (ETH)': quedarse con la raíz.
+                m_sym = re.match(r'^[a-z0-9]+', symbol)
+                if m_sym:
+                    symbol = m_sym.group(0)
                 if symbol in ('btc', 'bitcoin'):
                     symbol = 'bitcoin'
                 elif symbol in ('eth', 'ethereum'):
                     symbol = 'ethereum'
+                elif symbol in ('b2m',):
+                    symbol = 'bit2me-coin'
                 elif symbol not in CRYPTO_COINS:
                     print(f"[CSV Crypto] Símbolo no configurado, se ignora: {symbol}")
                     continue
+
+                # Regla de dominio: solo se importan compras pagadas en EUR.
+                # Envíos, ventas, regalos e intercambios se ignoran (igual que en bit2me/bitvavo).
+                tipo_fila = str(get_row_value(fila, ['tipo operación', 'tipo', 'operación', 'operacion']) or 'Compra').lower()
+                if tipo_fila not in ('compra', 'buy', 'trade', ''):
+                    print(f"[CSV Crypto] No es compra, se ignora: {symbol} ({tipo_fila})")
+                    continue
                 op = {
                     'symbol': symbol,
-                    'cantidad': parse_float(get_row_value(fila, ['cantidad', 'qty', 'quantity', 'amount', 'aantal', 'cantidad de la moneda'])),
-                    'importe': parse_float(get_row_value(fila, ['importe', 'cost', 'coste', 'monto', 'monto total', 'total'])),
-                    'precio': parse_float(get_row_value(fila, ['precio', 'price', 'precio unitario', 'prijs'])),
-                    'fecha': get_row_value(fila, ['fecha de la orden', 'fecha de operación', 'fecha', 'date']),
+                    'cantidad': _parse_decimal(get_row_value(fila, ['cantidad', 'qty', 'quantity', 'amount', 'aantal', 'cantidad en cripto', 'cantidad de la moneda'])),
+                    'importe': _parse_decimal(get_row_value(fila, ['importe', 'cost', 'coste', 'monto', 'monto total', 'total', 'valor', 'valor euros', 'valor eur', 'euros', 'eur'])),
+                    'precio': _parse_decimal(get_row_value(fila, ['precio', 'price', 'precio unitario', 'prijs'])),
+                    'fecha': get_row_value(fila, ['fecha de la orden', 'fecha de operación', 'fecha de operacion', 'fecha', 'date']),
                     'operador': get_row_value(fila, ['exchange', 'plataforma', 'operador', 'broker']),
-                    'tipo': get_row_value(fila, ['tipo operación', 'tipo']) or 'Compra',
+                    'tipo': get_row_value(fila, ['tipo operación', 'tipo', 'operación', 'operacion']) or 'Compra',
                 }
             elif formato == 'bit2me':
                 op = _fila_compra_bit2me(fila)
@@ -261,6 +285,10 @@ def _actualiza_precios_cripto(n_dias: int = 400) -> int:
     """Descarga de Binance las velas diarias en EUR (p. ej. BTCEUR/ETHEUR) y guarda el histórico en cripto_precios."""
     saved = 0
     for coin_id, coin_cfg in CRYPTO_COINS.items():
+        # Sin par en Binance (p. ej. B2M a precio manual): se respeta el histórico, no se cotiza.
+        if coin_cfg.get('precio_manual'):
+            print(f"[{coin_id}] Precio manual (sin par en Binance): se mantiene el histórico en BBDD")
+            continue
         pair = coin_cfg.get('par_binance') or f"{coin_cfg['symbol']}EUR"
         try:
             url = BINANCE_KLINES_URL.format(pair=pair, limit=n_dias)

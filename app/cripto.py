@@ -30,6 +30,28 @@ CRYPTO_COINS = {
         'operador_default': 'bit2me',
         'par_binance': 'ETHEUR',
     },
+    'solana': {
+        'symbol': 'SOL',
+        'name': 'Solana',
+        'color': '#9945ff',        # morado Solana
+        'operador_default': 'Bit2Me',
+        'par_binance': 'SOLEUR',   # par EUR en Binance para el histórico de precios
+    },
+    'xrp': {
+        'symbol': 'XRP',
+        'name': 'XRP',
+        'color': '#23292f',        # negro XRP
+        'operador_default': 'Bit2Me',
+        'par_binance': 'XRPEUR',
+    },
+    'bit2me-coin': {
+        'symbol': 'B2M',
+        'name': 'Bit2Me Coin',
+        'color': '#f39c12',        # ámbar
+        'operador_default': 'Bit2Me',
+        # Sin par en Binance (B2MEUR no existe): precio fijado manualmente (como el fondo Silverway).
+        'precio_manual': True,
+    },
 }
 
 # Mapeo de símbolos legibles → ids de CRYPTO_COINS (para datalist/modal)
