@@ -10,7 +10,14 @@ import csv
 import datetime
 import re
 import requests
+import math
+import sqlite3
+import threading
+from contextlib import closing
 from typing import Dict, Any
+from app import cripto
+
+_update_lock = threading.RLock()
 
 from app.portfolio import (
     parse_float,
@@ -281,6 +288,89 @@ def sync_csv_cripto_operaciones(in_dir: str) -> int:
     return inserted
 
 
+def sync_csv_cripto_posiciones(in_dir: str) -> int:
+    """Valida y sustituye la fotografía completa; nunca modifica compras ni precios."""
+    ruta = os.path.join(in_dir, 'posiciones_cripto', 'posiciones_actuales.csv')
+    if not os.path.isfile(ruta):
+        return 0  # Se conserva la última fotografía válida.
+    columnas = ['moneda', 'exchange', 'cantidad', 'capital_referencia_eur', 'valor_manual_eur']
+    posiciones = []
+    claves = set()
+    with open(ruta, encoding='utf-8-sig', newline='') as archivo:
+        lector = csv.reader(archivo, delimiter=';', strict=True)
+        cabecera = next(lector, [])
+        if [c.strip().lower() for c in cabecera] != columnas:
+            raise ValueError(f'{ruta}: línea 1: cabecera inválida; se espera {";".join(columnas)}')
+        try:
+            for fila in lector:
+                if not fila or not any(c.strip() for c in fila):
+                    continue
+                contexto = f'{ruta}: línea {lector.line_num}'
+                if len(fila) != len(columnas):
+                    raise ValueError(f'{contexto}: se esperan cinco columnas')
+                moneda, plataforma, cantidad, capital, manual = [c.strip() for c in fila]
+                symbol = _CRIPTO_SOPORTADA.get(moneda.upper(), moneda.lower())
+                if symbol not in CRYPTO_COINS:
+                    raise ValueError(f'{contexto}: moneda no soportada: {moneda}')
+                operador = ' '.join(plataforma.split()).casefold()
+                if not operador:
+                    raise ValueError(f'{contexto}: exchange vacío')
+                operador = {'bit2me': 'Bit2Me', 'bitvavo': 'Bitvavo'}.get(operador, operador)
+                clave = (symbol, operador.casefold())
+                if clave in claves:
+                    raise ValueError(f'{contexto}: moneda y exchange duplicados')
+                claves.add(clave)
+
+                def numero(texto, campo):
+                    try:
+                        valor = float(texto.replace(',', '.'))
+                    except ValueError:
+                        raise ValueError(f'{contexto}: {campo} no es un número válido') from None
+                    if not math.isfinite(valor) or valor < 0:
+                        raise ValueError(f'{contexto}: {campo} debe ser finito y no negativo')
+                    return valor
+
+                cantidad = numero(cantidad, 'cantidad')
+                capital = numero(capital, 'capital_referencia_eur')
+                valor_manual = numero(manual, 'valor_manual_eur') if manual else None
+                es_manual = CRYPTO_COINS[symbol].get('precio_manual', False)
+                if es_manual and valor_manual is None:
+                    raise ValueError(f'{contexto}: esta moneda requiere valoración manual total')
+                if not es_manual and valor_manual is not None:
+                    raise ValueError(f'{contexto}: esta moneda se valora con precios de mercado')
+                if cantidad == 0 and valor_manual not in (None, 0):
+                    raise ValueError(f'{contexto}: una cantidad cero no puede tener valor positivo')
+                posiciones.append((symbol, operador, cantidad, capital, valor_manual))
+        except csv.Error as error:
+            raise ValueError(f'{ruta}: línea {lector.line_num}: {error}') from error
+    if not posiciones:
+        raise ValueError(f'{ruta}: sin posiciones; se conserva la fotografía anterior')
+    posiciones.sort(key=lambda p: (p[0], p[1]))
+    os.makedirs(cripto.DATA_DIR, exist_ok=True)
+    with _update_lock, closing(sqlite3.connect(cripto.DB_PATH, timeout=30)) as conn:
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('''CREATE TABLE IF NOT EXISTS cripto_posiciones (
+                symbol TEXT NOT NULL,
+                operador TEXT NOT NULL COLLATE NOCASE,
+                cantidad REAL NOT NULL CHECK(cantidad >= 0),
+                capital_referencia_eur REAL NOT NULL CHECK(capital_referencia_eur >= 0),
+                valor_manual_eur REAL CHECK(valor_manual_eur >= 0),
+                importado_en TEXT NOT NULL,
+                PRIMARY KEY(symbol, operador)
+            )''')
+            anteriores = conn.execute(
+                'SELECT symbol, operador, cantidad, capital_referencia_eur, valor_manual_eur '
+                'FROM cripto_posiciones').fetchall()
+            if posiciones == sorted(anteriores, key=lambda p: (p[0], p[1])):
+                return 0
+            importado = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+            conn.execute('DELETE FROM cripto_posiciones')
+            conn.executemany('INSERT INTO cripto_posiciones VALUES (?, ?, ?, ?, ?, ?)',
+                             [p + (importado,) for p in posiciones])
+    return len(posiciones)
+
+
 def _actualiza_precios_cripto(n_dias: int = 400) -> int:
     """Descarga de Binance las velas diarias en EUR (p. ej. BTCEUR/ETHEUR) y guarda el histórico en cripto_precios."""
     saved = 0
@@ -313,9 +403,21 @@ def _actualiza_precios_cripto(n_dias: int = 400) -> int:
 
 
 def update_all_cripto(in_dir: str = DEFAULT_IN_DIR) -> Dict[str, Any]:
-    """Sincroniza CSVs de cripto y actualiza los precios desde Binance."""
+    """Serializa las actualizaciones cripto dentro del proceso, también desde CLI."""
+    with _update_lock:
+        return _update_all_cripto(in_dir)
+
+
+def _update_all_cripto(in_dir: str) -> Dict[str, Any]:
+    """Sincroniza compras y posiciones aunque falle la descarga de precios."""
     init_cripto_db()
-    resumen: Dict[str, Any] = {'operaciones_csv': 0, 'precios': 0, 'errores': []}
+    resumen: Dict[str, Any] = {'operaciones_csv': 0, 'posiciones_csv': 0, 'precios': 0, 'errores': []}
+
+    try:
+        resumen['posiciones_csv'] = sync_csv_cripto_posiciones(in_dir)
+    except Exception as e:
+        resumen['errores'].append(f'Posiciones: {e}')
+        print(f"[Posiciones Crypto] Error: {e}")
 
     try:
         resumen['operaciones_csv'] = sync_csv_cripto_operaciones(in_dir)
@@ -329,7 +431,7 @@ def update_all_cripto(in_dir: str = DEFAULT_IN_DIR) -> Dict[str, Any]:
         resumen['errores'].append(f'Precios: {e}')
         print(f"[Crypto] Error actualizando precios: {e}")
 
-    print(f"Actualización cripto completada: {resumen['operaciones_csv']} operaciones de CSV, {resumen['precios']} precios.")
+    print(f"Actualización cripto completada: {resumen['operaciones_csv']} operaciones de CSV, {resumen['posiciones_csv']} posiciones, {resumen['precios']} precios.")
     return resumen
 
 

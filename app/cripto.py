@@ -8,6 +8,8 @@ import os
 import datetime
 import sqlite3
 from typing import Dict, List, Any
+from pathlib import Path
+from contextlib import closing
 
 # --- RUTAS ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,7 +64,7 @@ SYMBOL_TO_CG = {v['symbol']: k for k, v in CRYPTO_COINS.items()}
 def init_cripto_db():
     """Crea las tablas cripto_operaciones y cripto_precios si no existen."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cripto_operaciones (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +90,29 @@ def init_cripto_db():
         conn.commit()
 
 
+def _lee_tabla_cripto(tabla: str, consulta: str, parametros=()):
+    """Lee sin crear la BBDD ni migrar tablas desde una petición web."""
+    if not os.path.isfile(DB_PATH):
+        return []
+    uri = Path(DB_PATH).resolve().as_uri() + '?mode=ro'
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabla,)
+        ).fetchone():
+            return []
+        return conn.execute(consulta, parametros).fetchall()
+
+
+def get_cripto_posiciones() -> List[Dict[str, Any]]:
+    """Fotografía vigente; sin tabla o sin filas se usa el historial de compras."""
+    filas = _lee_tabla_cripto('cripto_posiciones',
+        'SELECT symbol, operador, cantidad, capital_referencia_eur, valor_manual_eur, '
+        'importado_en FROM cripto_posiciones ORDER BY symbol, operador')
+    claves = ('symbol', 'operador', 'cantidad', 'capital_referencia_eur',
+              'valor_manual_eur', 'importado_en')
+    return [dict(zip(claves, fila)) for fila in filas]
+
+
 # --- OPERACIONES ---
 def insert_cripto_operacion(symbol: str, fecha: str, importe: float,
                             cantidad: float, precio_unitario: float = 0.0,
@@ -98,7 +123,7 @@ def insert_cripto_operacion(symbol: str, fecha: str, importe: float,
         raise ValueError('Importe y cantidad deben ser mayores que 0')
     precio = precio_unitario if precio_unitario > 0 else (importe / cantidad)
     init_cripto_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         try:
             cur = conn.execute(
                 "INSERT INTO cripto_operaciones "
@@ -117,7 +142,7 @@ def cripto_compra_existe_alta(symbol: str, fecha: str,
                               importe: float, cantidad: float) -> bool:
     """Comprueba si una compra de cripto ya está registrada."""
     init_cripto_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         row = conn.execute(
             "SELECT id FROM cripto_operaciones "
             "WHERE fecha = ? AND symbol = ? "
@@ -130,13 +155,9 @@ def cripto_compra_existe_alta(symbol: str, fecha: str,
 
 def get_all_cripto_operaciones() -> List[Dict[str, Any]]:
     """Devuelve todas las operaciones de cripto ordenadas por fecha DESC."""
-    init_cripto_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT id, symbol, fecha, importe, cantidad, precio_unitario, "
-            "tipo, operador, fuente "
-            "FROM cripto_operaciones ORDER BY fecha DESC, id DESC"
-        ).fetchall()
+    rows = _lee_tabla_cripto('cripto_operaciones',
+        "SELECT id, symbol, fecha, importe, cantidad, precio_unitario, "
+        "tipo, operador, fuente FROM cripto_operaciones ORDER BY fecha DESC, id DESC")
     return [{
         'id': r[0], 'symbol': r[1], 'fecha': r[2], 'importe': r[3],
         'cantidad': r[4], 'precio_unitario': r[5], 'tipo': r[6],
@@ -147,12 +168,8 @@ def get_all_cripto_operaciones() -> List[Dict[str, Any]]:
 # --- PRECIOS ---
 def get_cripto_precio_map(symbol: str) -> Dict[str, float]:
     """Devuelve {fecha: precio_eur} para un symbol (id de CRYPTO_COINS)."""
-    init_cripto_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute(
-            "SELECT fecha, precio_eur FROM cripto_precios WHERE symbol = ?",
-            (symbol,)
-        ).fetchall()
+    rows = _lee_tabla_cripto('cripto_precios',
+        "SELECT fecha, precio_eur FROM cripto_precios WHERE symbol = ?", (symbol,))
     return {row[0]: row[1] for row in rows}
 
 
@@ -161,7 +178,7 @@ def save_cripto_precio(symbol: str, fecha_str: str, precio_eur: float):
     if precio_eur <= 0:
         return
     init_cripto_db()
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO cripto_precios (symbol, fecha, precio_eur) "
             "VALUES (?, ?, ?)",
@@ -268,7 +285,7 @@ def generate_cripto_timeseries(symbol: str, orders: List[Dict[str, Any]],
 # --- RESUMEN COMPLETO (espejo de get_portfolio_summary) ---
 def get_cripto_portfolio_summary() -> Dict[str, Any]:
     """Devuelve el resumen completo del portfolio de criptoactivos."""
-    init_cripto_db()
+    posiciones = get_cripto_posiciones()
     ops = get_all_cripto_operaciones()
     today = datetime.date.today()
 
@@ -352,13 +369,48 @@ def get_cripto_portfolio_summary() -> Dict[str, Any]:
         tot_invested += total_inv
         tot_value += valor_actual
 
-    activos.sort(key=lambda x: -x['valor_actual'])
+    pendientes = 0
+    if posiciones:
+        activos = []
+        mercados = {}
+        tot_invested = sum(p['capital_referencia_eur'] for p in posiciones)
+        tot_value = 0.0
+        for p in posiciones:
+            sym = p['symbol']
+            meta = CRYPTO_COINS[sym]
+            manual = p['valor_manual_eur'] is not None
+            if sym not in mercados:
+                mercados[sym] = fetch_cripto_market(sym) if not manual else {}
+            mercado = mercados[sym]
+            precio = mercado.get('precio') or None
+            valor = p['valor_manual_eur'] if manual else (
+                p['cantidad'] * precio if precio is not None else (
+                    0.0 if p['cantidad'] == 0 else None))
+            diferencia = valor - p['capital_referencia_eur'] if valor is not None else None
+            porcentaje = (diferencia / p['capital_referencia_eur'] * 100
+                          if diferencia is not None and p['capital_referencia_eur'] > 0 else None)
+            pendientes += int(valor is None)
+            tot_value += valor if valor is not None else 0.0
+            activos.append({
+                'symbol': sym, 'symbol_legible': meta['symbol'], 'name': meta['name'],
+                'color': meta['color'], 'operador': p['operador'], 'cantidad': p['cantidad'],
+                'invertido': round(p['capital_referencia_eur'], 2),
+                'precio_actual': precio, 'fecha_precio': mercado.get('fecha', '-'),
+                'valor_actual': round(valor, 2) if valor is not None else None,
+                'beneficio_eur': round(diferencia, 2) if diferencia is not None else None,
+                'beneficio_pct': round(porcentaje, 2) if porcentaje is not None else None,
+                'valoracion_manual': manual, 'valoracion_pendiente': valor is None,
+                'importado_en': p['importado_en'],
+            })
 
+    activos.sort(key=lambda x: -(x['valor_actual'] or 0))
     for a in activos:
-        a['peso_pct'] = round((a['valor_actual'] / tot_value * 100), 2) if tot_value > 0 else 0.0
+        a['peso_pct'] = (round(a['valor_actual'] / tot_value * 100, 2)
+                         if not pendientes and tot_value > 0 else None)
 
-    tot_gain = tot_value - tot_invested
-    tot_pct = (tot_gain / tot_invested * 100) if tot_invested > 0 else 0.0
+    tot_gain = tot_value - tot_invested if not pendientes else None
+    tot_pct = (tot_gain / tot_invested * 100
+               if tot_gain is not None and tot_invested > 0 else None)
 
     # --- Series temporales ---
     all_dates = [o['date_obj'] for sym in orders_by_symbol for o in orders_by_symbol[sym]]
@@ -400,12 +452,16 @@ def get_cripto_portfolio_summary() -> Dict[str, Any]:
     return {
         'totales': {
             'invertido': round(tot_invested, 2),
-            'valor_mercado': round(tot_value, 2),
-            'beneficio_eur': round(tot_gain, 2),
-            'beneficio_pct': round(tot_pct, 2),
+            'valor_mercado': round(tot_value, 2) if not pendientes else None,
+            'valor_conocido': round(tot_value, 2),
+            'valoraciones_pendientes': pendientes,
+            'beneficio_eur': round(tot_gain, 2) if tot_gain is not None else None,
+            'beneficio_pct': round(tot_pct, 2) if tot_pct is not None else None,
             'activos_count': len(activos),
             'actualizado': datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
         },
+        'modo_posiciones': 'csv' if posiciones else 'compras',
+        'posiciones_importadas_en': posiciones[0]['importado_en'] if posiciones else None,
         'activos': activos,
         'timeseries': portfolio_series,
         'crypto_timeseries': fund_series,

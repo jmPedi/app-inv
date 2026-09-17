@@ -270,7 +270,9 @@
     <div id="criptoSection" class="hidden">
       <div class="section-actions">
         <button id="cryptoNewPurchaseBtn" class="btn-refresh" type="button">+ Nueva Compra Cripto</button>
-        <p class="muted">💡 También puedes importar CSVs de Bitvavo / bit2me en la carpeta <code>IN/crypto</code> y ejecutar <code>python -m app.update_cripto</code> para sincronizarlos. Los precios de BTC/ETH se actualizan automáticamente a las 18:00.</p>
+        <p class="muted">Compras: <code>IN/cripto</code>. Posiciones actuales: <code>IN/posiciones_cripto/posiciones_actuales.csv</code>. Se importan al arrancar y a las 18:00, o con <code>py -m app.update_cripto</code> en Windows (<code>python -m app.update_cripto</code> dentro del contenedor).</p>
+        <p id="cryptoEstadoCarga" role="status" aria-live="polite"></p>
+        <p class="muted" id="cryptoOrigen"></p>
       </div>
 
       <!-- KPI Crypto -->
@@ -281,12 +283,12 @@
           <div class="kpi-sub" id="cryptoKpiGain">-- € (--%)</div>
         </div>
         <div class="kpi-card">
-          <span class="kpi-label">Capital Invertido Cripto</span>
+          <span class="kpi-label" id="cryptoBaseLabel">Capital de referencia</span>
           <div class="kpi-value" id="cryptoKpiInvested">-- €</div>
-          <div class="kpi-sub muted">Aportaciones netas</div>
+          <div class="kpi-sub muted">Base para comparar la valoración</div>
         </div>
         <div class="kpi-card">
-          <span class="kpi-label">Rentabilidad Cripto</span>
+          <span class="kpi-label">Diferencia respecto a la base (%)</span>
           <div class="kpi-value" id="cryptoKpiGainPct">--%</div>
           <div class="kpi-sub" id="cryptoKpiGainAbs">-- € de beneficio</div>
         </div>
@@ -299,12 +301,10 @@
 
       <!-- Gráfico temporal cripto -->
       <div class="panel chart-panel-full">
+        <h3>Histórico basado en compras (no incluye ajustes de saldo)</h3>
+        <p class="muted">No representa las posiciones del CSV. La variación del valor incluye nuevas compras; no es rentabilidad sobre aportaciones. Sin cotización histórica se arrastra el último precio o el de compra.</p>
         <div class="chart-top-bar">
-          <div class="chart-view-selector" id="cryptoViewButtons">
-            <button class="view-tab active" onclick="switchCryptoChartView('TOTAL', this)">📊 Total Cripto</button>
-            <button class="view-tab" onclick="switchCryptoChartView('bitcoin', this)">🟠 BTC</button>
-            <button class="view-tab" onclick="switchCryptoChartView('ethereum', this)">🔵 ETH</button>
-          </div>
+          <div class="chart-view-selector" id="cryptoViewButtons"></div>
           <div class="timeframe-selector">
             <button class="tf-btn" onclick="setCryptoTimeframe('1D', this)">1D</button>
             <button class="tf-btn" onclick="setCryptoTimeframe('5D', this)">5D</button>
@@ -330,8 +330,9 @@
             Distribución Cripto
             <span class="info-icon" data-tooltip="Porcentaje del valor de tus criptoactivos asignado a cada moneda.">ℹ</span>
           </h3>
+          <p class="muted" id="cryptoDistribucionNota"></p>
           <div class="chart-container-doughnut">
-            <canvas id="criptoAllocationChart"></canvas>
+            <canvas id="criptoAllocationChart" role="img" aria-label="Distribución por moneda; valores detallados en la tabla de posiciones"></canvas>
           </div>
         </div>
         <div class="panel">
@@ -343,10 +344,11 @@
                   <th>Cripto</th>
                   <th>Exchange</th>
                   <th>Cantidad</th>
-                  <th>Precio Actual</th>
-                  <th>Valor Mercado</th>
-                  <th>Beneficio (€)</th>
-                  <th>Rentabilidad (%)</th>
+                  <th>Base (€)</th>
+                  <th>Precio / origen</th>
+                  <th>Valor actual</th>
+                  <th>Diferencia (€)</th>
+                  <th>Diferencia (%)</th>
                   <th>Peso</th>
                 </tr>
               </thead>

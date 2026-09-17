@@ -10,6 +10,16 @@ let cryptoDoughnutInstance = null;
 let globalCryptoData = null;
 let currentCryptoView = 'TOTAL';
 let currentCryptoTf = 'ALL';
+let cryptoCargando = false;
+
+function criptoTexto(valor) {
+  return String(valor ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+const criptoEur = valor => valor == null ? 'Pendiente' : formatEur(valor);
+const criptoPct = valor => valor == null ? 'N/D' : formatPct(valor);
 
 // Mapa símbolo legible -> id CoinGecko (debe coincidir con app/cripto.py)
 const SYMBOL_A_COIN = { 'BTC': 'bitcoin', 'ETH': 'ethereum' };
@@ -28,50 +38,74 @@ function switchTab(tab) {
   if (tabFondos) tabFondos.classList.toggle('active', esFondos);
   if (tabCripto) tabCripto.classList.toggle('active', !esFondos);
 
-  if (!esFondos) {
-    if (!globalCryptoData) {
-      loadCryptoData();
-    } else {
-      renderCryptoCharts();
-    }
-  }
+  if (!esFondos) loadCryptoData();
 }
 
 // --- Carga y render de datos ---
 async function loadCryptoData() {
+  if (cryptoCargando) return;
+  cryptoCargando = true;
+  const estado = document.getElementById('cryptoEstadoCarga');
+  estado.textContent = 'Actualizando datos…';
   try {
-    const res = await fetch('/api/criptoactivos');
+    const res = await fetch('/api/criptoactivos', { cache: 'no-store' });
     if (!res.ok) throw new Error('Error al conectar con /api/criptoactivos');
-    globalCryptoData = await res.json();
-
-    if (!Array.isArray(globalCryptoData.activos)) return;
-
-    renderCryptoKpis(globalCryptoData);
-    renderCryptoTable(globalCryptoData.activos);
-    renderCryptoOperations(globalCryptoData.operaciones);
-    renderCryptoDoughnutChart(globalCryptoData.activos);
-    renderCryptoTimeseriesChart();
+    const datos = await res.json();
+    if (!Array.isArray(datos.activos)) throw new Error('Respuesta de cartera inválida');
+    globalCryptoData = datos;
+    renderCryptoKpis(datos);
+    renderCryptoTable(datos.activos);
+    renderCryptoOperations(datos.operaciones);
+    renderCryptoViewButtons();
+    renderCryptoCharts();
+    estado.textContent = '';
   } catch (err) {
     console.error(err);
-    alert('Error al cargar criptoactivos: ' + err.message);
+    estado.textContent = `No se pudieron actualizar los datos. ${globalCryptoData ? 'Se muestran datos anteriores, posiblemente desactualizados.' : ''} ${err.message}`;
+  } finally {
+    cryptoCargando = false;
   }
+}
+
+function renderCryptoViewButtons() {
+  const monedas = new Map(globalCryptoData.activos.map(a => [a.symbol, a.symbol_legible]));
+  (globalCryptoData.operaciones || []).forEach(o => monedas.set(o.symbol, o.symbol_legible));
+  if (currentCryptoView !== 'TOTAL' && !monedas.has(currentCryptoView)) currentCryptoView = 'TOTAL';
+  const contenedor = document.getElementById('cryptoViewButtons');
+  contenedor.replaceChildren();
+  [['TOTAL', 'Total compras'], ...monedas].forEach(([id, nombre]) => {
+    const boton = document.createElement('button');
+    boton.type = 'button';
+    boton.className = `view-tab ${id === currentCryptoView ? 'active' : ''}`;
+    boton.textContent = nombre;
+    boton.onclick = () => switchCryptoChartView(id, boton);
+    contenedor.appendChild(boton);
+  });
 }
 
 function renderCryptoKpis(d) {
   const t = d.totales;
-  document.getElementById('cryptoKpiMarketVal').textContent = formatEur(t.valor_mercado);
+  document.getElementById('cryptoKpiMarketVal').textContent = criptoEur(t.valor_mercado);
+  const esCsv = d.modo_posiciones === 'csv';
+  document.getElementById('cryptoBaseLabel').textContent = esCsv ? 'Capital de referencia' : 'Importe de compras';
+  document.getElementById('cryptoOrigen').textContent = esCsv
+    ? `Posiciones desde CSV · Importación: ${new Date(d.posiciones_importadas_en).toLocaleString('es-ES')}. Fotografía completa: las compras nuevas no actualizan estos saldos. Mantén el CSV al día. La base puede incluir regalos; no equivale a aportaciones de efectivo.`
+    : 'Sin fotografía CSV: posiciones calculadas como compras acumuladas, sin descontar envíos ni ventas.';
+  document.getElementById('cryptoDistribucionNota').textContent = t.valoraciones_pendientes
+    ? `Valoración incompleta: ${t.valoraciones_pendientes} posiciones pendientes. Valor conocido: ${formatEur(t.valor_conocido)}. No se calculan pesos ni distribución.`
+    : 'Distribución por moneda según el valor actual; las plataformas de una misma moneda se agrupan.';
   document.getElementById('cryptoKpiInvested').textContent = formatEur(t.invertido);
 
   const gainElem = document.getElementById('cryptoKpiGain');
-  gainElem.textContent = `${formatEur(t.beneficio_eur)} (${formatPct(t.beneficio_pct)})`;
-  gainElem.className = `kpi-sub ${t.beneficio_eur >= 0 ? 'positive' : 'negative'}`;
+  gainElem.textContent = `${criptoEur(t.beneficio_eur)} (${criptoPct(t.beneficio_pct)}) respecto a la base`;
+  gainElem.className = `kpi-sub ${t.beneficio_eur == null ? 'muted' : t.beneficio_eur >= 0 ? 'positive' : 'negative'}`;
 
   const gainPctElem = document.getElementById('cryptoKpiGainPct');
-  gainPctElem.textContent = formatPct(t.beneficio_pct);
-  gainPctElem.className = `kpi-value ${t.beneficio_pct >= 0 ? 'positive' : 'negative'}`;
+  gainPctElem.textContent = criptoPct(t.beneficio_pct);
+  gainPctElem.className = `kpi-value ${t.beneficio_pct == null ? 'muted' : t.beneficio_pct >= 0 ? 'positive' : 'negative'}`;
 
-  document.getElementById('cryptoKpiGainAbs').textContent = `${formatEur(t.beneficio_eur)} de beneficio`;
-  document.getElementById('cryptoKpiCount').textContent = t.activos_count;
+  document.getElementById('cryptoKpiGainAbs').textContent = `${criptoEur(t.beneficio_eur)} respecto a la base`;
+  document.getElementById('cryptoKpiCount').textContent = `${t.activos_count} posiciones · ${new Set(d.activos.map(a => a.symbol)).size} monedas`;
   document.getElementById('cryptoKpiLastUpdated').textContent = `Actualizado: ${t.actualizado}`;
 }
 
@@ -81,17 +115,17 @@ function renderCryptoTable(activos) {
   tbody.innerHTML = activos.map(a => `
     <tr>
       <td>
-        <div class="fund-title">${a.symbol_legible} · ${a.name}</div>
-        <span class="fund-meta">${a.cantidad} ${a.symbol_legible}</span>
+        <div class="fund-title">${criptoTexto(a.symbol_legible)} · ${criptoTexto(a.name)}</div>
       </td>
-      <td><span class="badge-operator">${a.operador || 'N/D'}</span></td>
-      <td><strong>${a.cantidad}</strong></td>
-      <td>${a.precio_actual > 0 ? a.precio_actual.toFixed(2) + ' €' : 'N/D'}
-        <span class="fund-meta">${a.fecha_precio}</span></td>
-      <td><strong>${formatEur(a.valor_actual)}</strong></td>
-      <td class="${a.beneficio_eur >= 0 ? 'positive' : 'negative'}"><strong>${a.beneficio_eur > 0 ? '+' : ''}${formatEur(a.beneficio_eur)}</strong></td>
-      <td>${renderBadge(a.beneficio_pct)}</td>
-      <td><strong>${a.peso_pct.toFixed(1)}%</strong></td>
+      <td><span class="badge-operator">${criptoTexto(a.operador || 'N/D')}</span></td>
+      <td><strong>${a.cantidad.toLocaleString('es-ES', { maximumFractionDigits: 8 })}</strong></td>
+      <td>${formatEur(a.invertido)}</td>
+      <td>${a.valoracion_manual ? 'Valoración manual total' : a.precio_actual > 0 ? formatEur(a.precio_actual) : 'Sin cotización'}
+        <span class="fund-meta">${a.valoracion_manual ? 'Importado: ' + criptoTexto(new Date(a.importado_en).toLocaleString('es-ES')) : criptoTexto(a.fecha_precio)}</span></td>
+      <td><strong>${criptoEur(a.valor_actual)}</strong></td>
+      <td class="${a.beneficio_eur == null ? 'muted' : a.beneficio_eur >= 0 ? 'positive' : 'negative'}"><strong>${a.beneficio_eur > 0 ? '+' : ''}${criptoEur(a.beneficio_eur)}</strong></td>
+      <td>${a.beneficio_pct == null ? 'N/D' : renderBadge(a.beneficio_pct)}</td>
+      <td><strong>${a.peso_pct == null ? 'N/D' : a.peso_pct.toFixed(1) + '%'}</strong></td>
     </tr>
   `).join('');
 }
@@ -116,10 +150,17 @@ function renderCryptoDoughnutChart(activos) {
   const ctxEl = document.getElementById('criptoAllocationChart');
   if (!ctxEl) return;
   const ctx = ctxEl.getContext('2d');
-  const labels = activos.map(a => a.symbol_legible);
-  const data = activos.map(a => a.valor_actual);
-
   if (cryptoDoughnutInstance) cryptoDoughnutInstance.destroy();
+  cryptoDoughnutInstance = null;
+  if (activos.some(a => a.valor_actual == null)) return;
+  const monedas = new Map();
+  activos.forEach(a => {
+    if (!monedas.has(a.symbol)) monedas.set(a.symbol, { ...a, valor_actual: 0 });
+    monedas.get(a.symbol).valor_actual += a.valor_actual;
+  });
+  activos = [...monedas.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+  const labels = activos.map(a => `${a.symbol_legible}: ${formatEur(a.valor_actual)}`);
+  const data = activos.map(a => a.valor_actual);
 
   cryptoDoughnutInstance = new Chart(ctx, {
     type: 'doughnut',
